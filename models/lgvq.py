@@ -35,9 +35,7 @@ class T2M_VQVAE_LG(VQVAE_bodypart):
         self.cls_token = {
             name: nn.Parameter(torch.randn(1, 1, part_dim)) for name, part_dim in self.parts_output_dim.items()
         }
-        # self.vit[name] = MotionViT(self.parts_output_dim[name], num_layers, num_heads)  # 1D ViT for motion codes
-        # Masked text prediction
-        # self.mask_decoder = CrossAttentionDecoder(motion_dim, text_dim)
+
         self.mask_decoder = nn.ModuleDict(
             {name: CrossAttentionDecoder(self.parts_output_dim[name], text_dim) for name in self.parts_output_dim}
         )
@@ -62,7 +60,14 @@ class T2M_VQVAE_LG(VQVAE_bodypart):
             for name in self.parts_name
             }
         )
-        self.tau = nn.Parameter(torch.tensor(0.07))
+        for name in self.parts_name:
+            nn.init.kaiming_normal_(self.gsa_text_proj[name][0].weight, mode='fan_out', nonlinearity='gelu')
+            nn.init.zeros_(self.gsa_text_proj[name][0].bias)
+            nn.init.xavier_uniform_(self.gsa_text_proj[name][-1].weight)
+            
+            # 运动投影层
+            nn.init.kaiming_normal_(self.relation_proj_motion[name][0].weight, mode='fan_in', nonlinearity='gelu')
+        self.tau = nn.Parameter(torch.tensor(0.5))
         # Loss weights
         self.alpha = 0.5  # GSA weight
         self.beta = 0.3   # MTP weight
@@ -88,11 +93,11 @@ class T2M_VQVAE_LG(VQVAE_bodypart):
     
     def _get_text_features(self, text):
         """获取文本特征"""
-        with torch.no_grad():
-            text_tokens = self.tokenizer(text, return_tensors='pt', padding=True, truncation=True)
-            text_tokens = {k: v.to(self.clip.device) for k, v in text_tokens.items()}
-            text_features = self.clip.get_text_features(**text_tokens)
-        return text_tokens, text_features
+        # with torch.no_grad():
+        text_tokens = self.tokenizer(text, return_tensors='pt', padding=True, truncation=True)
+        text_tokens = {k: v.to(self.clip.device) for k, v in text_tokens.items()}
+        text_features = self.clip.get_text_features(**text_tokens)
+        return text_tokens, text_features.detach()
     
     def forward(self, parts, text):
         """
@@ -171,25 +176,17 @@ class T2M_VQVAE_LG(VQVAE_bodypart):
 
     def calculate_loss(self, outputs):
         """计算多任务损失"""
-        # 基础VQ损失
-        # vq_loss = torch.stack(outputs['vq_losses']).mean()
-        # perplexity = torch.stack(outputs['perplexity']).mean()
         # 全局语义对齐损失 (对比学习)
         gsa_loss = 0
         for e_CLS, e_TEXT in outputs['gsa_features']:
-            # logits = torch.matmul(F.normalize(e_CLS, dim=-1), 
-            #                     F.normalize(e_TEXT, dim=-1).t())  # [B, B]
-            # for e_CLS, e_TEXT in outputs['gsa_features']:
             # 添加温度缩放
             logits = torch.matmul(
                 F.normalize(e_CLS, p=2, dim=1),
-                F.normalize(e_TEXT, p=2, dim=1).t()
+                F.layer_norm(e_TEXT, e_TEXT.shape[1:]).t()
             ) / self.tau.clamp(min=1e-4)
             labels = torch.arange(logits.size(0), device=logits.device)
             gsa_loss += F.cross_entropy(logits, labels)
-            # 在训练循环中添加
-            print(f"GSA Grad Norm: {torch.norm(self.gsa_text_proj['Root'][-1].weight.grad)}")
-            print(f"Temperature: {self.tau.item()}")
+            
         
         # 掩码文本预测损失 (特征回归)
         mtp_loss = 0

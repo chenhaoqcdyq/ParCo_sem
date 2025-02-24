@@ -52,7 +52,8 @@
         "--out-dir=output",
         "--exp-name=ParCo",
         "--dataname=t2m",
-        "--batch-size=2",
+        "--batch-size=2048",
+        "--print-iter=50",
         "--lr=2e-4",
         "--total-iter=300000",
         "--lr-scheduler=200000",
@@ -69,7 +70,7 @@
       "env": {
         "PYTHONPATH": "${workspaceFolder}/..:${env:PYTHONPATH}",
         "TORCH_DISTRIBUTED_DEBUG": "INFO",
-        "CUDA_VISIBLE_DEVICES": "0",
+        "CUDA_VISIBLE_DEVICES": "1",
         "TOKENIZERS_PARALLELISM": "false"
       }
     }

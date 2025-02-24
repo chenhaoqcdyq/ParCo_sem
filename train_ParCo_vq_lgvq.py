@@ -156,7 +156,7 @@ scale_lr = args.lr/2e-4
 # 提取 vit, gsa_text_proj 和 tau 部分的参数
 vit_params = {'params': net.vit.parameters(), "lr": 1e-4 * scale_lr, "betas": (0.9, 0.99), "weight_decay": args.weight_decay}
 gsa_text_proj_params = {'params': net.gsa_text_proj.parameters(), "lr": 1e-3 * scale_lr, "betas": (0.9, 0.99), "weight_decay": args.weight_decay}
-tau_params = {'params': net.tau.parameters(), "lr": 1e-2 * scale_lr, "betas": (0.9, 0.99), "weight_decay": args.weight_decay}
+tau_params = {'params': net.tau, "lr": 1e-2 * scale_lr, "betas": (0.9, 0.99), "weight_decay": args.weight_decay}
 
 # 提取其余部分的参数
 other_params = {'params': [param for name, param in net.named_parameters() if not any(part in name for part in ['vit', 'gsa_text_proj', 'tau'])], "lr": 2e-4 * scale_lr, "betas": (0.9, 0.99), "weight_decay": args.weight_decay}
@@ -204,7 +204,7 @@ for nb_iter in range(1, args.warm_up_iter):
     optimizer.zero_grad()
     loss.backward()
     optimizer.step()
-
+    
     avg_recons += loss_motion.item()
     perplexity = losses.gather_loss_list(perplexity_list)
     avg_perplexity += perplexity.item()
@@ -221,6 +221,9 @@ for nb_iter in range(1, args.warm_up_iter):
         avg_gsa_loss /= args.print_iter
         avg_mtp_loss /= args.print_iter
         avg_ras_loss /= args.print_iter
+        # 在训练循环中添加
+        print(f"GSA Grad Norm: {torch.norm(net.gsa_text_proj['Root'][-1].weight.grad)}")
+        print(f"Temperature: {net.tau.item()}")
         
         logger.info(f"Warmup. Iter {nb_iter} :  lr {current_lr:.5f} \t Commit. {avg_commit:.5f} \t PPL. {avg_perplexity:.2f} \t Recons.  {avg_recons:.5f}")
         logger.info(f"\t GSA. {avg_gsa_loss:.5f} \t MTP. {avg_mtp_loss:.5f} \t RAS. {avg_ras_loss:.5f}")
@@ -287,6 +290,9 @@ for nb_iter in range(1, args.total_iter + 1):
         avg_gsa_loss /= args.print_iter
         avg_mtp_loss /= args.print_iter
         avg_ras_loss /= args.print_iter
+        # 在训练循环中添加
+        print(f"GSA Grad Norm: {torch.norm(net.gsa_text_proj['Root'][-1].weight.grad)}")
+        print(f"Temperature: {net.tau.item()}")
         
         writer.add_scalar('./Train/L1', avg_recons, nb_iter)
         writer.add_scalar('./Train/PPL', avg_perplexity, nb_iter)
