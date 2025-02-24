@@ -25,9 +25,6 @@ class T2M_VQVAE_LG(VQVAE_bodypart):
                          down_t, stride_t, depth, dilation_growth_rate, activation, norm)
         
         # Original VQVAE components
-        # self.encoder = MotionEncoder(motion_dim, num_code)
-        # self.decoder = MotionDecoder(motion_dim)
-        # self.codebook = nn.Embedding(num_code, motion_dim)
         self.text_feat_dim = 512
         
         self.clip, self.tokenizer = self.load_clip(clip_model_name)
@@ -65,10 +62,10 @@ class T2M_VQVAE_LG(VQVAE_bodypart):
             for name in self.parts_name
             }
         )
-        
+        self.tau = nn.Parameter(torch.tensor(0.07))
         # Loss weights
-        self.alpha = 1.0  # GSA weight
-        self.beta = 0.5   # MTP weight
+        self.alpha = 0.5  # GSA weight
+        self.beta = 0.3   # MTP weight
         self.gamma = 0.2  # RAS weight
 
     def load_checkpoint(self, checkpoint):
@@ -180,10 +177,19 @@ class T2M_VQVAE_LG(VQVAE_bodypart):
         # 全局语义对齐损失 (对比学习)
         gsa_loss = 0
         for e_CLS, e_TEXT in outputs['gsa_features']:
-            logits = torch.matmul(F.normalize(e_CLS, dim=-1), 
-                                F.normalize(e_TEXT, dim=-1).t())  # [B, B]
+            # logits = torch.matmul(F.normalize(e_CLS, dim=-1), 
+            #                     F.normalize(e_TEXT, dim=-1).t())  # [B, B]
+            # for e_CLS, e_TEXT in outputs['gsa_features']:
+            # 添加温度缩放
+            logits = torch.matmul(
+                F.normalize(e_CLS, p=2, dim=1),
+                F.normalize(e_TEXT, p=2, dim=1).t()
+            ) / self.tau.clamp(min=1e-4)
             labels = torch.arange(logits.size(0), device=logits.device)
             gsa_loss += F.cross_entropy(logits, labels)
+            # 在训练循环中添加
+            print(f"GSA Grad Norm: {torch.norm(self.gsa_text_proj['Root'][-1].weight.grad)}")
+            print(f"Temperature: {self.tau.item()}")
         
         # 掩码文本预测损失 (特征回归)
         mtp_loss = 0
@@ -197,7 +203,7 @@ class T2M_VQVAE_LG(VQVAE_bodypart):
             ras_loss += F.mse_loss(sim_matrix, ras_matrix)
         
         # 总损失
-        total_loss = (self.alpha * gsa_loss +
+        total_loss = (self.alpha * gsa_loss/len(self.parts_name) +
                      self.beta * mtp_loss +
                      self.gamma * ras_loss)
         

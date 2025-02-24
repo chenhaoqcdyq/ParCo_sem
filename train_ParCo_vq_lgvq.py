@@ -152,7 +152,17 @@ net.cuda()
 
 ##### ---- Optimizer & Scheduler ---- #####
 print('\n===> Constructing optimizer, scheduler, and Loss...')
-optimizer = optim.AdamW(net.parameters(), lr=args.lr, betas=(0.9, 0.99), weight_decay=args.weight_decay)
+scale_lr = args.lr/2e-4
+# 提取 vit, gsa_text_proj 和 tau 部分的参数
+vit_params = {'params': net.vit.parameters(), "lr": 1e-4 * scale_lr, "betas": (0.9, 0.99), "weight_decay": args.weight_decay}
+gsa_text_proj_params = {'params': net.gsa_text_proj.parameters(), "lr": 1e-3 * scale_lr, "betas": (0.9, 0.99), "weight_decay": args.weight_decay}
+tau_params = {'params': net.tau.parameters(), "lr": 1e-2 * scale_lr, "betas": (0.9, 0.99), "weight_decay": args.weight_decay}
+
+# 提取其余部分的参数
+other_params = {'params': [param for name, param in net.named_parameters() if not any(part in name for part in ['vit', 'gsa_text_proj', 'tau'])], "lr": 2e-4 * scale_lr, "betas": (0.9, 0.99), "weight_decay": args.weight_decay}
+
+# 构建优化器
+optimizer = optim.AdamW([other_params, vit_params, gsa_text_proj_params, tau_params])
 scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=args.lr_scheduler, gamma=args.gamma)
 Loss = losses.ReConsLossBodyPart(args.recons_loss, args.nb_joints)
 
