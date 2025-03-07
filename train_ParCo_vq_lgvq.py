@@ -111,6 +111,31 @@ logger.info(f'Training on {args.dataname}, motions are with {args.nb_joints} joi
 wrapper_opt = get_opt(dataset_opt_path, torch.device('cuda'))
 eval_wrapper = EvaluatorModelWrapper(wrapper_opt)
 
+##### ---- Network ---- #####
+print('\n\n===> Constructing network...')
+net = lgvq.T2M_VQVAE_LG(
+    args,  # use args to define different parameters in different quantizers
+    args.vqvae_arch_cfg['parts_code_nb'],
+    args.vqvae_arch_cfg['parts_code_dim'],
+    args.vqvae_arch_cfg['parts_output_dim'],
+    args.vqvae_arch_cfg['parts_hidden_dim'],
+    args.down_t,
+    args.stride_t,
+    args.depth,
+    args.dilation_growth_rate,
+    args.vq_act,
+    args.vq_norm,
+    num_heads=args.num_heads,
+    num_layers=args.num_layers,
+)
+net.load_checkpoint('output/ParCo_official_HumanML3D/VQVAE-ParCo-t2m-default/net_last.pth')
+
+if args.resume_pth:
+    logger.info('loading checkpoint from {}'.format(args.resume_pth))
+    ckpt = torch.load(args.resume_pth, map_location='cpu')
+    net.load_state_dict(ckpt['net'], strict=True)
+net.train()
+net.cuda()
 
 ##### ---- Dataloader ---- #####
 print('\n\n===> Constructing dataset and dataloader...\n\n')
@@ -126,43 +151,19 @@ val_loader = dataset_TM_eval_bodypart.DATALoader(args.dataname, False,
                                         w_vectorizer,
                                         unit_length=2**args.down_t)
 
-##### ---- Network ---- #####
-print('\n\n===> Constructing network...')
-net = lgvq.T2M_VQVAE_LG(
-    args,  # use args to define different parameters in different quantizers
-    args.vqvae_arch_cfg['parts_code_nb'],
-    args.vqvae_arch_cfg['parts_code_dim'],
-    args.vqvae_arch_cfg['parts_output_dim'],
-    args.vqvae_arch_cfg['parts_hidden_dim'],
-    args.down_t,
-    args.stride_t,
-    args.depth,
-    args.dilation_growth_rate,
-    args.vq_act,
-    args.vq_norm
-)
-net.load_checkpoint('output/ParCo_official_HumanML3D/VQVAE-ParCo-t2m-default/net_last.pth')
-
-if args.resume_pth:
-    logger.info('loading checkpoint from {}'.format(args.resume_pth))
-    ckpt = torch.load(args.resume_pth, map_location='cpu')
-    net.load_state_dict(ckpt['net'], strict=True)
-net.train()
-net.cuda()
-
 ##### ---- Optimizer & Scheduler ---- #####
 print('\n===> Constructing optimizer, scheduler, and Loss...')
 scale_lr = args.lr/2e-4
 # 提取 vit, gsa_text_proj 和 tau 部分的参数
 vit_params = {'params': net.vit.parameters(), "lr": 1e-4 * scale_lr, "betas": (0.9, 0.99), "weight_decay": args.weight_decay}
 gsa_text_proj_params = {'params': net.gsa_text_proj.parameters(), "lr": 1e-3 * scale_lr, "betas": (0.9, 0.99), "weight_decay": args.weight_decay}
-tau_params = {'params': net.tau, "lr": 1e-2 * scale_lr, "betas": (0.9, 0.99), "weight_decay": args.weight_decay}
+# tau_params = {'params': net.tau, "lr": 1e-2 * scale_lr, "betas": (0.9, 0.99), "weight_decay": args.weight_decay}
 
 # 提取其余部分的参数
-other_params = {'params': [param for name, param in net.named_parameters() if not any(part in name for part in ['vit', 'gsa_text_proj', 'tau'])], "lr": 2e-4 * scale_lr, "betas": (0.9, 0.99), "weight_decay": args.weight_decay}
+other_params = {'params': [param for name, param in net.named_parameters() if not any(part in name for part in ['vit', 'gsa_text_proj'])], "lr": 2e-4 * scale_lr, "betas": (0.9, 0.99), "weight_decay": args.weight_decay}
 
 # 构建优化器
-optimizer = optim.AdamW([other_params, vit_params, gsa_text_proj_params, tau_params])
+optimizer = optim.AdamW([other_params, vit_params, gsa_text_proj_params])
 scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=args.lr_scheduler, gamma=args.gamma)
 Loss = losses.ReConsLossBodyPart(args.recons_loss, args.nb_joints)
 
@@ -176,11 +177,11 @@ for nb_iter in range(1, args.warm_up_iter):
     
     optimizer, current_lr = update_lr_warm_up(optimizer, nb_iter, args.warm_up_iter, args.lr)
 
-    gt_parts, text, text_tokens= next(train_loader_iter)
+    gt_parts, text, text_tokens, text_feature, text_feature_all, text_id= next(train_loader_iter)
     for i in range(len(gt_parts)):
         gt_parts[i] = gt_parts[i].cuda().float()
 
-    outputs = net(gt_parts, text_tokens.cuda())
+    outputs = net(gt_parts, text_tokens.cuda(), text_feature.cuda(), text_feature_all.cuda())
     pred_parts = outputs['recon_parts']
     loss_commit_list = outputs['vq_losses']
     perplexity_list = outputs['perplexity']
@@ -198,7 +199,7 @@ for nb_iter in range(1, args.warm_up_iter):
     loss_vel = losses.gather_loss_list(loss_vel_list)
 
     loss = loss_motion + args.commit * loss_commit + args.loss_vel * loss_vel
-    loss_lgvq = net.calculate_loss(outputs)
+    loss_lgvq = net.calculate_loss(outputs, text_id)
     loss += loss_lgvq['total_loss']
 
     optimizer.zero_grad()
@@ -223,7 +224,7 @@ for nb_iter in range(1, args.warm_up_iter):
         avg_ras_loss /= args.print_iter
         # 在训练循环中添加
         print(f"GSA Grad Norm: {torch.norm(net.gsa_text_proj['Root'][-1].weight.grad)}")
-        print(f"Temperature: {net.tau.item()}")
+        # print(f"Temperature: {net.tau.item()}")
         
         logger.info(f"Warmup. Iter {nb_iter} :  lr {current_lr:.5f} \t Commit. {avg_commit:.5f} \t PPL. {avg_perplexity:.2f} \t Recons.  {avg_recons:.5f}")
         logger.info(f"\t GSA. {avg_gsa_loss:.5f} \t MTP. {avg_mtp_loss:.5f} \t RAS. {avg_ras_loss:.5f}")
@@ -243,12 +244,12 @@ avg_gsa_loss, avg_mtp_loss, avg_ras_loss = 0., 0., 0.
 
 for nb_iter in range(1, args.total_iter + 1):
 
-    gt_parts, text, text_tokens = next(train_loader_iter)
+    gt_parts, text, text_tokens, text_feature, text_feature_all, text_id= next(train_loader_iter)
     for i in range(len(gt_parts)):
         gt_parts[i] = gt_parts[i].cuda().float()
 
     # pred_parts, loss_commit_list, perplexity_list = net(gt_parts, text_tokens.cuda())
-    outputs = net(gt_parts, text_tokens.cuda())
+    outputs = net(gt_parts, text_tokens.cuda(), text_feature.cuda(), text_feature_all.cuda())
     pred_parts = outputs['recon_parts']
     loss_commit_list = outputs['vq_losses']
     perplexity_list = outputs['perplexity']
@@ -267,7 +268,7 @@ for nb_iter in range(1, args.total_iter + 1):
     loss_vel = losses.gather_loss_list(loss_vel_list)
 
     loss = loss_motion + args.commit * loss_commit + args.loss_vel * loss_vel
-    loss_lgvq = net.calculate_loss(outputs)
+    loss_lgvq = net.calculate_loss(outputs, text_id)
     loss += loss_lgvq['total_loss']
     
     optimizer.zero_grad()
@@ -292,7 +293,7 @@ for nb_iter in range(1, args.total_iter + 1):
         avg_ras_loss /= args.print_iter
         # 在训练循环中添加
         print(f"GSA Grad Norm: {torch.norm(net.gsa_text_proj['Root'][-1].weight.grad)}")
-        print(f"Temperature: {net.tau.item()}")
+        # print(f"Temperature: {net.tau.item()}")
         
         writer.add_scalar('./Train/L1', avg_recons, nb_iter)
         writer.add_scalar('./Train/PPL', avg_perplexity, nb_iter)

@@ -39,6 +39,43 @@
   // 使用 IntelliSense 了解相关属性。
   // 悬停以查看现有属性的描述。
   // 欲了解更多信息，请访问: https://go.microsoft.com/fwlink/?linkid=830387
+  // "version": "0.2.0",
+  // "configurations": [
+  //   {
+  //     "name": "Python 调试程序: 包含参数的当前文件",
+  //     "type": "debugpy",
+  //     "request": "launch",
+  //     // "program": "models/semantic.py",
+  //     "program": "train_ParCo_rvq_global.py",
+  //     "console": "integratedTerminal",
+  //     "args": [
+  //       "--out-dir=output",
+  //       "--exp-name=train_ParCo_rvq_global",
+  //       "--dataname=t2m",
+  //       "--batch-size=256",
+  //       "--print-iter=50",
+  //       "--lr=2e-4",
+  //       "--total-iter=300000",
+  //       "--lr-scheduler=200000",
+  //       "--vqvae-cfg=default",
+  //       "--down-t=2",
+  //       "--depth=3",
+  //       "--dilation-growth-rate=3",
+  //       "--vq-act=relu",
+  //       "--quantizer=ema_reset",
+  //       "--loss-vel=0.5",
+  //       "--recons-loss=l1_smooth",
+  //       // "--resume-pth=output/00239-t2m-rvq_sem/VQVAE-rvq_sem-t2m-default/net_last.pth"
+  //     ],
+  //     "justMyCode": false,
+  //     "env": {
+  //       "PYTHONPATH": "${workspaceFolder}/..:${env:PYTHONPATH}",
+  //       "TORCH_DISTRIBUTED_DEBUG": "INFO",
+  //       "CUDA_VISIBLE_DEVICES": "1",
+  //       "TOKENIZERS_PARALLELISM": "false"
+  //     }
+  //   }
+  // ]
   "version": "0.2.0",
   "configurations": [
     {
@@ -46,13 +83,13 @@
       "type": "debugpy",
       "request": "launch",
       // "program": "models/semantic.py",
-      "program": "train_ParCo_vq_lgvq.py",
+      "program": "train_ParCo_rvq_sem.py",
       "console": "integratedTerminal",
       "args": [
         "--out-dir=output",
-        "--exp-name=ParCo",
+        "--exp-name=train_ParCo_rvq_sem",
         "--dataname=t2m",
-        "--batch-size=2048",
+        "--batch-size=256",
         "--print-iter=50",
         "--lr=2e-4",
         "--total-iter=300000",
@@ -64,15 +101,44 @@
         "--vq-act=relu",
         "--quantizer=ema_reset",
         "--loss-vel=0.5",
-        "--recons-loss=l1_smooth"
+        "--recons-loss=l1_smooth",
+        "--vision=9",
+        "--decoder_vision=1",
+        "--num_quantizers=1",
+        // "--resume-pth=output/00350-t2m-v4/VQVAE-v4-t2m-default/net_best_fid.pth"
+        // "--resume-pth=output/00286-t2m-sem_plus/VQVAE-sem_plus-t2m-default/net_last.pth"
+        // python train_ParCo_rvq_sem.py --out-dir=output --exp-name=v4 --dataname=t2m --batch-size=512 --print-iter=50 --lr=2e-4 --total-iter=300000 --lr-scheduler=200000 --vqvae-cfg=default --down-t=2 --depth=3 --dilation-growth-rate=3 --vq-act=relu --quantizer=ema_reset --loss-vel=0.5 --recons-loss=l1_smooth --vision=4 --decoder_vision=2
       ],
       "justMyCode": false,
       "env": {
         "PYTHONPATH": "${workspaceFolder}/..:${env:PYTHONPATH}",
         "TORCH_DISTRIBUTED_DEBUG": "INFO",
-        "CUDA_VISIBLE_DEVICES": "1",
+        "CUDA_VISIBLE_DEVICES": "0",
         "TOKENIZERS_PARALLELISM": "false"
       }
     }
   ]
+  // ////////////////eval///////////////////////
+  // "version": "0.2.0",
+  // "configurations": [
+  //   {
+  //     "name": "Python 调试程序: 包含参数的当前文件",
+  //     "type": "debugpy",
+  //     "request": "launch",
+  //     // "program": "models/semantic.py",
+  //     "program": "eval_ParCo_rvq_sem.py",
+  //     "console": "integratedTerminal",
+  //     "args": [
+  //       "--vqvae-train-dir=output/00350-t2m-v4/VQVAE-v4-t2m-default",
+  //       "--select-vqvae-ckpt=fid"
+  //     ],
+  //     "justMyCode": false,
+  //     "env": {
+  //       "PYTHONPATH": "${workspaceFolder}/..:${env:PYTHONPATH}",
+  //       "TORCH_DISTRIBUTED_DEBUG": "INFO",
+  //       "CUDA_VISIBLE_DEVICES": "1",
+  //       "TOKENIZERS_PARALLELISM": "false"
+  //     }
+  //   }
+  // ]
 }

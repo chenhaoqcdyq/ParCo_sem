@@ -8,12 +8,12 @@ import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
 
 from dataset import dataset_VQ_bodypart, dataset_TM_eval_bodypart
-from models import vqvae_bodypart as vqvae
+from models import rvqvae_bodypart as vqvae
 from models.evaluator_wrapper import EvaluatorModelWrapper
 
 from options.get_eval_option import get_opt
 import options.option_vq_bodypart as option_vq
-from options.option_vq_bodypart import vqvae_bodypart_cfg
+from options.option_vq_bodypart import vqvae_bodypart_cfg, vqvae_bodypart_cfg_plus
 
 import utils.losses as losses
 import utils.utils_model as utils_model
@@ -35,7 +35,8 @@ def update_lr_warm_up(optimizer, nb_iter, warm_up_iter, lr):
 ##### ---- Parse args ---- #####
 args = option_vq.get_args_parser()
 torch.manual_seed(args.seed)
-args.vqvae_arch_cfg = vqvae_bodypart_cfg[args.vqvae_cfg]
+# args.vqvae_arch_cfg = vqvae_bodypart_cfg[args.vqvae_cfg]
+args.vqvae_arch_cfg = vqvae_bodypart_cfg_plus[args.vqvae_cfg]
 
 ##### ---- Exp dirs ---- #####
 """
@@ -127,6 +128,7 @@ val_loader = dataset_TM_eval_bodypart.DATALoader(args.dataname, False,
 
 ##### ---- Network ---- #####
 print('\n\n===> Constructing network...')
+# net = vqvae.HumanVQVAEBodyPart(
 net = vqvae.HumanVQVAEBodyPart(
     args,  # use args to define different parameters in different quantizers
     args.vqvae_arch_cfg['parts_code_nb'],

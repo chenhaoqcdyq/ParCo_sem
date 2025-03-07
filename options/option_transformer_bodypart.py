@@ -134,6 +134,10 @@ def get_args_parser(args=None):
     parser.add_argument("--depth", type=int, default=3, help="depth of the network")
     parser.add_argument("--dilation-growth-rate", type=int, default=3, help="dilation growth rate")
     parser.add_argument('--vq-act', type=str, default='relu', choices = ['relu', 'silu', 'gelu'], help='dataset directory')
+    
+    parser.add_argument('--num_quantizers', type=int, default=6, help='num_quantizers')
+    parser.add_argument('--shared_codebook', action="store_true")
+    parser.add_argument('--quantize_dropout_prob', type=float, default=0.2, help='quantize_dropout_prob')
 
     ## gpt arch
     parser.add_argument("--block-size", type=int, default=25, help="seq len")

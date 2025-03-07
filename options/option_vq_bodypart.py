@@ -40,6 +40,45 @@ vqvae_bodypart_cfg = {
 
 }
 
+vqvae_bodypart_cfg_plus = {
+    'default': dict(
+        parts_code_nb={  # number of codes
+            'Root': 1024,
+            'R_Leg': 1024,
+            'L_Leg': 1024,
+            'Backbone': 1024,
+            'R_Arm': 1024,
+            'L_Arm': 1024,
+        },
+        parts_code_dim={  # Remember code_dim should be same to output_dim
+            'Root': 64,
+            'R_Leg': 256,
+            'L_Leg': 256,
+            'Backbone': 256,
+            'R_Arm': 256,
+            'L_Arm': 256,
+        },
+        parts_output_dim={  # dimension of encoder's output
+            'Root': 64,
+            'R_Leg': 256,
+            'L_Leg': 256,
+            'Backbone': 256,
+            'R_Arm': 256,
+            'L_Arm': 256,
+        },
+        parts_hidden_dim={  # hidden dimension of conv1d in encoder/decoder
+            'Root': 64,
+            'R_Leg': 256,
+            'L_Leg': 256,
+            'Backbone': 256,
+            'R_Arm': 256,
+            'L_Arm': 256,
+        }
+
+    ),
+
+}
+
 def get_args_parser(args=None):
     parser = argparse.ArgumentParser(description='Optimal Transport AutoEncoder training for AIST',
                                      add_help=True,
@@ -74,10 +113,20 @@ def get_args_parser(args=None):
     parser.add_argument("--dilation-growth-rate", type=int, default=3, help="dilation growth rate")
     parser.add_argument('--vq-act', type=str, default='relu', choices = ['relu', 'silu', 'gelu'], help='dataset directory')
     parser.add_argument('--vq-norm', type=str, default=None, help='dataset directory')
+    parser.add_argument('--num-heads', type=int, default=4)
+    parser.add_argument('--num-layers', type=int, default=2)
+    parser.add_argument('--bodyconfig', type=bool, default=False)
+    parser.add_argument('--causal', type=bool, default=False, help='causal squence')
     
     ## quantizer
     parser.add_argument("--quantizer", type=str, default='ema_reset', choices = ['ema', 'orig', 'ema_reset', 'reset'], help="eps for optimal transport")
     parser.add_argument('--beta', type=float, default=1.0, help='commitment loss in standard VQ')
+    parser.add_argument('--num_quantizers_global', type=int, default=6, help='num_quantizers')
+    parser.add_argument('--num_quantizers', type=int, default=3, help='num_quantizers')
+    parser.add_argument('--shared_codebook', action="store_true")
+    parser.add_argument('--quantize_dropout_prob', type=float, default=0.2, help='quantize_dropout_prob')
+    parser.add_argument('--decoder_vision', type=int, default=1, help='decoder vision') # 1:cnn 2:transformer
+    parser.add_argument('--vision', type=int, default=4, help='arch vision')
 
     ## resume
     parser.add_argument("--resume-pth", type=str, default=None, help='resume pth for VQ')

@@ -22,7 +22,7 @@ def tensorborad_add_video_xyz(writer, xyz, nb_iter, tag, nb_vis=4, title_batch=N
 
 
 @torch.no_grad()        
-def evaluation_vqvae(out_dir, val_loader, net, logger, writer, nb_iter, best_fid, best_iter, best_div, best_top1, best_top2, best_top3, best_matching, eval_wrapper, draw = True, save = True, savegif=False, savenpy=False) : 
+def evaluation_vqvae(out_dir, val_loader, net, logger, writer, nb_iter, best_fid, best_iter, best_div, best_top1, best_top2, best_top3, best_matching, eval_wrapper, draw = True, save = True, savegif=False, savenpy=False, best_mpjpe=1e9) : 
     """
     Evaluate the VQVAE, used in train and test.
     Compute the FID, DIV, and R-Precision.
@@ -44,6 +44,8 @@ def evaluation_vqvae(out_dir, val_loader, net, logger, writer, nb_iter, best_fid
     nb_sample = 0
     matching_score_real = 0
     matching_score_pred = 0
+    mpjpe = 0
+    num_poses = 0
     for batch in val_loader:
 
         # Get motion and parts. We use parts to represent parts' motion.
@@ -88,10 +90,12 @@ def evaluation_vqvae(out_dir, val_loader, net, logger, writer, nb_iter, best_fid
 
             # (parts, GT) ==> (reconstruct_parts)
             #   parts is normalized.
-            outputs = net(single_parts, caption[i:i+1])
-
+            try:
+                pred_parts, loss_commit, perplexity = net(single_parts, caption[i:i+1])
+            except:
+                pred_parts, loss_commit, perplexity, contrastive_loss = net(single_parts, caption[i:i+1])
             # pred_pose, loss_commit, perplexity = net(motion[i:i+1, :m_length[i]])
-            pred_parts = outputs['recon_parts']
+            # pred_parts = outputs['recon_parts']
             # pred_parts ==> whole_motion
             #   todo: support different shared_joint_rec_mode in the parts2whole function
             pred_pose = val_loader.dataset.parts2whole(pred_parts, mode=val_loader.dataset.dataset_name)
@@ -108,7 +112,10 @@ def evaluation_vqvae(out_dir, val_loader, net, logger, writer, nb_iter, best_fid
                 np.save(os.path.join(out_dir, name[i]+'_pred.npy'), pred_xyz.detach().cpu().numpy())
 
             pred_pose_eval[i:i+1,:m_length[i],:] = pred_pose
-
+            
+            mpjpe += torch.sum(calculate_mpjpe(pose_xyz, pred_xyz))
+            num_poses += pose_xyz.shape[0]
+            
             if i < min(4, bs):
                 draw_org.append(pose_xyz)
                 draw_pred.append(pred_xyz)
@@ -129,7 +136,7 @@ def evaluation_vqvae(out_dir, val_loader, net, logger, writer, nb_iter, best_fid
         matching_score_pred += temp_match
 
         nb_sample += bs
-
+    mpjpe = mpjpe / num_poses
     motion_annotation_np = torch.cat(motion_annotation_list, dim=0).cpu().numpy()
     motion_pred_np = torch.cat(motion_pred_list, dim=0).cpu().numpy()
 
@@ -147,7 +154,7 @@ def evaluation_vqvae(out_dir, val_loader, net, logger, writer, nb_iter, best_fid
 
     fid = calculate_frechet_distance(gt_mu, gt_cov, mu, cov)
 
-    msg = f"--> \t Eva. Iter {nb_iter} :, FID. {fid:.4f}, Diversity Real. {diversity_real:.4f}, Diversity. {diversity:.4f}, R_precision_real. {R_precision_real}, R_precision. {R_precision}, matching_score_real. {matching_score_real}, matching_score_pred. {matching_score_pred}"
+    msg = f"--> \t Eva. Iter {nb_iter} :, FID. {fid:.4f}, Diversity Real. {diversity_real:.4f}, Diversity. {diversity:.4f}, R_precision_real. {R_precision_real}, R_precision. {R_precision}, matching_score_real. {matching_score_real}, matching_score_pred. {matching_score_pred}, mpjpe. {mpjpe:.4f}"
     logger.info(msg)
     
     if draw:
@@ -205,12 +212,18 @@ def evaluation_vqvae(out_dir, val_loader, net, logger, writer, nb_iter, best_fid
         best_matching = matching_score_pred
         if save:
             torch.save({'net' : net.state_dict()}, os.path.join(out_dir, 'net_best_matching.pth'))
-
+            
+    if mpjpe < best_mpjpe:
+        msg = f"--> --> \t mpjpe Improved from {best_mpjpe:.5f} to {mpjpe:.5f} !!!"
+        logger.info(msg)
+        best_mpjpe = mpjpe
+        # if save:
+        #     torch.save({'net' : net.state_dict()}, os.path.join(out_dir, 'net_best_mpjpe.pth'))
     if save:
         torch.save({'net' : net.state_dict()}, os.path.join(out_dir, 'net_last.pth'))
 
     net.train()
-    return best_fid, best_iter, best_div, best_top1, best_top2, best_top3, best_matching, writer, logger
+    return best_fid, best_iter, best_div, best_top1, best_top2, best_top3, best_matching, writer, logger, best_mpjpe
 
 
 
@@ -677,7 +690,25 @@ def calculate_diversity(activation, diversity_times):
     dist = linalg.norm(activation[first_indices] - activation[second_indices], axis=1)
     return dist.mean()
 
+def calculate_mpjpe(gt_joints, pred_joints):
+    """
+    gt_joints: num_poses x num_joints(22) x 3
+    pred_joints: num_poses x num_joints(22) x 3
+    (obtained from recover_from_ric())
+    """
+    assert gt_joints.shape == pred_joints.shape, f"GT shape: {gt_joints.shape}, pred shape: {pred_joints.shape}"
 
+    # Align by root (pelvis)
+    pelvis = gt_joints[:, [0]].mean(1)
+    gt_joints = gt_joints - torch.unsqueeze(pelvis, dim=1)
+    pelvis = pred_joints[:, [0]].mean(1)
+    pred_joints = pred_joints - torch.unsqueeze(pelvis, dim=1)
+
+    # Compute MPJPE
+    mpjpe = torch.linalg.norm(pred_joints - gt_joints, dim=-1) # num_poses x num_joints=22
+    mpjpe_seq = mpjpe.mean(-1) # num_poses
+
+    return mpjpe_seq
 
 def calculate_frechet_distance(mu1, sigma1, mu2, sigma2, eps=1e-6):
 

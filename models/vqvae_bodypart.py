@@ -24,6 +24,12 @@ class VQVAE_bodypart(nn.Module):
         self.parts_output_dim = parts_output_dim
         self.parts_hidden_dim = parts_hidden_dim
         self.quantizer_type = args.quantizer
+        self.down_t = down_t
+        self.stride_t = stride_t
+        self.depth = depth
+        self.dilation_growth_rate = dilation_growth_rate
+        self.activation = activation
+        self.norm = norm
 
         if args.dataname == 't2m':
             parts_input_dim = {
@@ -34,7 +40,7 @@ class VQVAE_bodypart(nn.Module):
                 'R_Arm': 60,
                 'L_Arm': 60,
             }
-
+            self.parts_input_dim = parts_input_dim
             for name in self.parts_name:
                 raw_dim = parts_input_dim[name]
                 hidden_dim = parts_hidden_dim[name]
@@ -69,7 +75,7 @@ class VQVAE_bodypart(nn.Module):
                 'R_Arm': 48,
                 'L_Arm': 48,
             }
-
+            self.parts_input_dim = parts_input_dim
             for name in self.parts_name:
                 raw_dim = parts_input_dim[name]
                 hidden_dim = parts_hidden_dim[name]

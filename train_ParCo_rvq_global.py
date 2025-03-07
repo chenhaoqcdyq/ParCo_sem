@@ -8,7 +8,7 @@ import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
 
 from dataset import dataset_VQ_bodypart, dataset_TM_eval_bodypart
-from models import vqvae_bodypart as vqvae
+from models import rvqvae_bodypart_global as vqvae
 from models.evaluator_wrapper import EvaluatorModelWrapper
 
 from options.get_eval_option import get_opt
@@ -127,7 +127,7 @@ val_loader = dataset_TM_eval_bodypart.DATALoader(args.dataname, False,
 
 ##### ---- Network ---- #####
 print('\n\n===> Constructing network...')
-net = vqvae.HumanVQVAEBodyPart(
+net = vqvae.HumanVQVAETransformer(
     args,  # use args to define different parameters in different quantizers
     args.vqvae_arch_cfg['parts_code_nb'],
     args.vqvae_arch_cfg['parts_code_dim'],
@@ -140,7 +140,7 @@ net = vqvae.HumanVQVAEBodyPart(
     args.vq_act,
     args.vq_norm
 )
-
+net.load_checkpoint('output/ParCo_official_HumanML3D/VQVAE-ParCo-t2m-default/net_last.pth')
 
 if args.resume_pth:
     logger.info('loading checkpoint from {}'.format(args.resume_pth))
