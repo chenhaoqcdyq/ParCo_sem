@@ -1521,10 +1521,7 @@ class EnhancedPartFusionV13(nn.Module):
                  ):
         super().__init__()
         self.position = position
-        # 全身特征聚合Token
-        self.global_token = nn.Parameter(torch.randn(1, 1, d_model))
-        # 增强的位置编码体系
-        self.part_position = nn.Embedding(6, d_model)  # 部件类型编码
+
         if position == 0:
             pass
         elif position == 1:
@@ -1585,6 +1582,10 @@ class EnhancedPartFusionV14(nn.Module):
                  ):
         super().__init__()
         self.position = position
+        # 全身特征聚合Token
+        # self.global_token = nn.Parameter(torch.randn(1, 1, d_model))
+        # 增强的位置编码体系
+        self.part_position = nn.Embedding(6, d_model)  # 部件类型编码
         if position == 0:
             pass
         elif position == 1:
@@ -1598,12 +1599,20 @@ class EnhancedPartFusionV14(nn.Module):
         self.part_projs = nn.ModuleList([
             DynamicProjection(dim, d_model) for dim in part_dims
         ])
+        # 不带结构约束的空间Transformer
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=4*d_model,
+            batch_first=True,
+        )
         time_encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=nhead,
             dim_feedforward=4*d_model,
             batch_first=True
         )
+        self.spatial_transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         if causal:
             self.time_transformer = CausalTransformerEncoder(time_encoder_layer, num_layers=num_layers)
         else:
@@ -1630,7 +1639,13 @@ class EnhancedPartFusionV14(nn.Module):
         elif self.position == 2:
             time_feat = self.time_position(time_feat.permute(0, 2, 1)).permute(0, 2, 1)
         time_feat = self.time_transformer(time_feat)  # [B*7, T, d]
-        feature = rearrange(time_feat, '(b p) t d -> b t p d', b=B, p=6)
+        
+        spatial_cube = rearrange(time_feat, '(b p) t d -> (b t) p d', b=B, p=6)
+        # global_tokens = self.global_token.expand(B*T, -1, -1)
+        spatial_cube = spatial_cube + self.part_position.weight[None, :, :]
+        spatial_feature = self.spatial_transformer(spatial_cube)
+        
+        feature = rearrange(spatial_feature, '(b t) p d -> b t p d', b=B, p=6)
         return feature, rearrange(feature, 'b t p d -> p b t d', b=B)
 
 
