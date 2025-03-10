@@ -93,7 +93,10 @@ def evaluation_vqvae(out_dir, val_loader, net, logger, writer, nb_iter, best_fid
             try:
                 pred_parts, loss_commit, perplexity = net(single_parts, caption[i:i+1])
             except:
-                pred_parts, loss_commit, perplexity, contrastive_loss = net(single_parts, caption[i:i+1])
+                try:
+                    pred_parts, loss_commit, perplexity, contrastive_loss = net(single_parts, caption[i:i+1])
+                except:
+                    pred_parts, loss_commit, perplexity = net(single_parts)
             # pred_pose, loss_commit, perplexity = net(motion[i:i+1, :m_length[i]])
             # pred_parts = outputs['recon_parts']
             # pred_parts ==> whole_motion

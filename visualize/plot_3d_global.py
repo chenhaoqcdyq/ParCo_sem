@@ -63,11 +63,12 @@ def plot_3d_motion(args, figsize=(10, 10), fps=120, radius=4):
         
         init()
         
-        # ax.lines = []
-        # ax.collections = []
-        ax.clear()
+        ax._lines = []
+        ax._collections = []
+        # ax.clear()
         ax.view_init(elev=110, azim=-90)
-        ax.dist = 7.5
+        # ax.dist = 7.5
+        ax._dist=7.5
         #         ax =
         plot_xzPlane(MINS[0] - trajec[index, 0], MAXS[0] - trajec[index, 0], 0, MINS[2] - trajec[index, 1],
                      MAXS[2] - trajec[index, 1])
@@ -123,7 +124,8 @@ def draw_to_batch(smpl_joints_batch, title_batch=None, outname=None) :
     for i in range(batch_size) : 
         out.append(plot_3d_motion([smpl_joints_batch[i], None, title_batch[i] if title_batch is not None else None]))
         if outname is not None:
-            imageio.mimsave(outname[i], np.array(out[-1]), fps=20)
+            # imageio.mimsave(outname[i], np.array(out[-1]), fps=20)
+            imageio.mimsave(outname[i], np.array(out[-1]), duration=50)
     out = torch.stack(out, axis=0)
     return out
     

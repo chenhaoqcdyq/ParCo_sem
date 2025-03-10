@@ -82,7 +82,7 @@
       "name": "Python 调试程序: 包含参数的当前文件",
       "type": "debugpy",
       "request": "launch",
-      // "program": "models/semantic.py",
+      // "program": "train_ParCo_rvq_eval.py",
       "program": "train_ParCo_rvq_sem.py",
       "console": "integratedTerminal",
       "args": [
@@ -102,18 +102,23 @@
         "--quantizer=ema_reset",
         "--loss-vel=0.5",
         "--recons-loss=l1_smooth",
-        "--vision=9",
+        "--vision=13",
         "--decoder_vision=1",
         "--num_quantizers=1",
+        "--causal=False",
+        "--position=1",
+        "--num-layers=8"
+        // "--resume-pth=output/00381-t2m-v6/VQVAE-v6-t2m-default/net_best_fid.pth"
         // "--resume-pth=output/00350-t2m-v4/VQVAE-v4-t2m-default/net_best_fid.pth"
         // "--resume-pth=output/00286-t2m-sem_plus/VQVAE-sem_plus-t2m-default/net_last.pth"
         // python train_ParCo_rvq_sem.py --out-dir=output --exp-name=v4 --dataname=t2m --batch-size=512 --print-iter=50 --lr=2e-4 --total-iter=300000 --lr-scheduler=200000 --vqvae-cfg=default --down-t=2 --depth=3 --dilation-growth-rate=3 --vq-act=relu --quantizer=ema_reset --loss-vel=0.5 --recons-loss=l1_smooth --vision=4 --decoder_vision=2
+        // export CUDA_VISIBLE_DEVICES=0 && python train_ParCo_rvq_sem.py --out-dir=output --exp-name=v13 --dataname=t2m --batch-size=256 --print-iter=200 --lr=2e-4 --total-iter=300000 --lr-scheduler=200000 --vqvae-cfg=default --down-t=2 --depth=3 --dilation-growth-rate=3 --vq-act=relu --quantizer=ema_reset --loss-vel=0.5 --recons-loss=l1_smooth --vision=13 --num-layers=8 --position=1 --causal=False
       ],
       "justMyCode": false,
       "env": {
         "PYTHONPATH": "${workspaceFolder}/..:${env:PYTHONPATH}",
         "TORCH_DISTRIBUTED_DEBUG": "INFO",
-        "CUDA_VISIBLE_DEVICES": "0",
+        "CUDA_VISIBLE_DEVICES": "1",
         "TOKENIZERS_PARALLELISM": "false"
       }
     }
@@ -126,10 +131,10 @@
   //     "type": "debugpy",
   //     "request": "launch",
   //     // "program": "models/semantic.py",
-  //     "program": "eval_ParCo_rvq_sem.py",
+  //     "program": "eval_ParCo_vq.py",
   //     "console": "integratedTerminal",
   //     "args": [
-  //       "--vqvae-train-dir=output/00350-t2m-v4/VQVAE-v4-t2m-default",
+  //       "--vqvae-train-dir=output/ParCo_official_HumanML3D/VQVAE-ParCo-t2m-default",
   //       "--select-vqvae-ckpt=fid"
   //     ],
   //     "justMyCode": false,

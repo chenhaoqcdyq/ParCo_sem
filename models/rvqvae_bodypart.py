@@ -14,6 +14,7 @@ from transformers import CLIPTextModel, CLIPTokenizer
 import os
 from models.vqvae_bodypart import VQVAE_bodypart as VQVAE_ori
 from models.layers.transformer import SpatialTemporalBlock
+from models.resnet import Resnet1D
 os.environ["TOKENIZERS_PARALLELISM"] = "false"  # 必须放在其他导入之前
 
 class VQVAE_bodypart(nn.Module):
@@ -382,6 +383,7 @@ class TemporalDownsamplerV2(nn.Module):
         x = (x1 + x2 + x3)/3
         x = x.permute(0, 2, 1)  # [B, T//4, C]
         return self.norm(x)
+
 
 class ContrastiveLossWithSTS(nn.Module):
     def __init__(self, temperature=0.07, threshold=0.85):
@@ -879,7 +881,7 @@ class CausalTransformerEncoder(nn.TransformerEncoder):
             return super().forward(src, mask=causal_mask, **kwargs)
         return super().forward(src, mask, **kwargs)
 
-# 只做全身空间的交互, vit结构作为encoder, 不做限制的transformer
+# 全身空间的交互, 和时间的交互 vit结构作为encoder, 不做限制的transformer
 class EnhancedPartFusionV6(nn.Module):
     def __init__(self, 
                  part_dims=[7,50,50,60,60,60],
@@ -892,6 +894,8 @@ class EnhancedPartFusionV6(nn.Module):
         self.global_token = nn.Parameter(torch.randn(1, 1, d_model))
         # 增强的位置编码体系
         self.part_position = nn.Embedding(6, d_model)  # 部件类型编码
+        # 时间下采样模块
+        self.temporal_downsample = TemporalDownsamplerV2(d_model)
         # 层级式特征投影
         self.part_projs = nn.ModuleList([
             DynamicProjection(dim, d_model) for dim in part_dims
@@ -1205,6 +1209,430 @@ class EnhancedPartFusionV9(nn.Module):
         global_feat = feature[:, :, 0, :]  # 取第一个位置的特征
         # 残差连接增强
         return global_feat, rearrange(feature[:, :, 1:, :], 'b t p d -> p b t d', b=B)
+
+class SpatialTemporalBlock(nn.Module):
+    """自定义空间-时间注意力块"""
+    def __init__(self, d_model, nhead, dim_feedforward=1024, dropout=0.1, causal=False):
+        super().__init__()
+        # 空间注意力组件
+        self.spatial_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
+        self.norm1 = nn.LayerNorm(d_model)
+        self.dropout1 = nn.Dropout(dropout)
+        
+        # 时间注意力组件（因果）
+        self.temporal_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.dropout2 = nn.Dropout(dropout)
+        
+        # MLP组件
+        self.linear1 = nn.Linear(d_model, dim_feedforward)
+        self.dropout = nn.Dropout(dropout)
+        self.linear2 = nn.Linear(dim_feedforward, d_model)
+        self.norm3 = nn.LayerNorm(d_model)
+        self.dropout3 = nn.Dropout(dropout)
+        self.causal = causal
+        # 激活函数
+        self.activation = nn.GELU()
+
+    def forward(self, src, spatial_mask=None, temporal_mask=None):
+        # 空间注意力阶段
+        B, T, P, D = src.shape  # [Batch, Time, Parts, Dim]
+        
+        # 展开空间维度
+        spatial_src = rearrange(src, 'b t p d -> (b t) p d')  # [B*T, P, D]
+        
+        # 空间注意力（部件间交互）
+        spatial_src2 = self.spatial_attn(
+            spatial_src, spatial_src, spatial_src,
+            key_padding_mask=spatial_mask
+        )[0]
+        spatial_src = spatial_src + self.dropout1(spatial_src2)
+        spatial_src = self.norm1(spatial_src)
+        
+        # 重组回时空结构
+        src = rearrange(spatial_src, '(b t) p d -> b t p d', b=B, t=T)
+        
+        # 时间注意力阶段（因果）
+        temporal_src = rearrange(src, 'b t p d -> (b p) t d')  # [B*P, T, D]
+        
+        # 生成因果掩码
+        if temporal_mask is None and self.causal == True:
+            L = temporal_src.size(1)
+            temporal_mask = torch.triu(
+                torch.ones(L, L, dtype=torch.bool, device=src.device),
+                diagonal=1
+            )
+        
+        # 时间注意力（带因果约束）
+        temporal_src2 = self.temporal_attn(
+            temporal_src, temporal_src, temporal_src,
+            attn_mask=temporal_mask
+        )[0]
+        temporal_src = temporal_src + self.dropout2(temporal_src2)
+        temporal_src = self.norm2(temporal_src)
+        
+        # 重组回最终维度
+        src = rearrange(temporal_src, '(b p) t d -> b t p d', b=B, p=P)
+        
+        # MLP阶段
+        mlp_src = self.linear2(self.dropout(self.activation(self.linear1(src))))
+        src = src + self.dropout3(mlp_src)
+        src = self.norm3(src)
+        
+        return src
+
+class EnhancedPartFusionV10(nn.Module):
+    def __init__(self, 
+                 part_dims=[7,50,50,60,60,60],
+                 d_model=256,
+                 nhead=8,
+                 num_layers=4,
+                 max_time_steps=196):
+        super().__init__()
+        # 初始化全局token
+        self.global_token = nn.Parameter(torch.randn(1, 1, d_model))
+        
+        # 增强的位置编码系统
+        self.part_position = nn.Embedding(6, d_model)  # 部件类型编码
+        self.time_position = nn.Parameter(torch.randn(1, max_time_steps, d_model))  # 可学习时间编码
+        
+        # 动态特征投影
+        self.part_projs = nn.ModuleList([
+            DynamicProjection(dim, d_model) for dim in part_dims
+        ])
+        
+        # 构建自定义Transformer块
+        self.blocks = nn.ModuleList([
+            SpatialTemporalBlock(
+                d_model=d_model,
+                nhead=nhead,
+                dim_feedforward=4*d_model
+            ) for _ in range(num_layers)
+        ])
+        
+        # 初始化参数
+        self._reset_parameters()
+
+    def _reset_parameters(self):
+        # 位置编码的特殊初始化
+        nn.init.normal_(self.time_position, mean=0, std=0.02)
+        nn.init.normal_(self.global_token, mean=0, std=0.02)
+
+    def forward(self, parts_feature):
+        B, T = parts_feature[0].shape[0], parts_feature[0].shape[1]
+        
+        # 部件特征预处理
+        part_embeds = []
+        for i, (proj, feat) in enumerate(zip(self.part_projs, parts_feature)):
+            # 时间维度卷积处理
+            feat = feat.permute(0, 2, 1)  # [B, T, C] -> [B, C, T]
+            proj_feat = proj(feat.float()).permute(0, 2, 1)  # [B, T, d_model]
+            
+            # 添加部件位置编码
+            part_embeds.append(proj_feat + self.part_position.weight[i][None, None, :])
+        
+        # 构建时空立方体 [B, T, 6, d_model]
+        spatial_cube = torch.stack(part_embeds, dim=2)
+        
+        # 添加全局token并扩展时间维度
+        global_tokens = self.global_token.expand(B, T, -1, -1)  # [B, T, 1, d_model]
+        fused_feat = torch.cat([global_tokens, spatial_cube], dim=2)  # [B, T, 7, d_model]
+        
+        # 注入时间位置编码
+        fused_feat += self.time_position[:, :T, None, :]  # 广播到部件维度
+        
+        # 通过多个空间-时间块
+        for block in self.blocks:
+            fused_feat = block(fused_feat)
+        
+        # 分解输出特征
+        global_feat = fused_feat[:, :, 0, :]  # [B, T, d_model]
+        part_feats = fused_feat[:, :, 1:, :]  # [B, T, 6, d_model]
+        
+        return global_feat, rearrange(part_feats, 'b t p d -> p b t d')
+
+# 全身空间的交互, 和时间的交互 vit结构作为encoder, 不做限制的transformer, 在V6版本基础上加入时间位置编码
+class EnhancedPartFusionV12(nn.Module):
+    def __init__(self, 
+                 part_dims=[7,50,50,60,60,60],
+                 d_model=256,
+                 nhead=8,
+                 num_layers=4,
+                 max_time_steps = 196,
+                 ):
+        super().__init__()
+        # 全身特征聚合Token
+        self.global_token = nn.Parameter(torch.randn(1, 1, d_model))
+        # 增强的位置编码体系
+        self.part_position = nn.Embedding(6, d_model)  # 部件类型编码
+        self.time_position = nn.Parameter(torch.randn(1, max_time_steps, d_model))  # 可学习时间编码s
+        # 层级式特征投影
+        self.part_projs = nn.ModuleList([
+            DynamicProjection(dim, d_model) for dim in part_dims
+        ])
+        # 不带结构约束的空间Transformer
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=4*d_model,
+            batch_first=True,
+        )
+        time_encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=4*d_model,
+            batch_first=True
+        )
+        self.spatial_transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.time_transformer = CausalTransformerEncoder(time_encoder_layer, num_layers=num_layers)
+
+    def forward(self, parts_feature):
+        # 部件特征预处理
+        B, T = parts_feature[0].shape[0], parts_feature[0].shape[1]
+        
+        # 时空位置编码注入
+        part_embeds = []
+        for i, (proj, feat) in enumerate(zip(self.part_projs, parts_feature)):
+            # 时间维度卷积处理
+            feat = feat.permute(0, 2, 1)  # [B, T, C] -> [B, C, T]
+            proj_feat = proj(feat.float()).permute(0, 2, 1)  # [B, T, d_model]
+            
+            # 部件类型编码
+            part_embeds.append(proj_feat + self.part_position.weight[i][None, None, :])
+            
+        global_tokens = self.global_token.expand(B*T, -1, -1)
+        
+        # 构建时空特征立方体 [B, T, 6, d_model]
+        spatial_cube = torch.stack(part_embeds, dim=2)
+        spatial_cube = rearrange(spatial_cube, 'b t p d -> (b p) t d')
+        # 构建融合输入 [B*T, 7, d_model]（6个部件+1个全局Token）
+        fused_feat = torch.cat([
+            global_tokens,
+            rearrange(spatial_cube, '(b p) t d -> (b t) p d', b=B)
+        ], dim=1)
+        
+        # 空间维度交互 (部件间关系)        spatial_cube = spatial_cube + self.time_position[:, :T, :][None, :, None, :]
+        spatial_feat = rearrange(fused_feat, '(b t) p d-> (b t) p d', b=B, p=7)
+        
+        spatial_feat = self.spatial_transformer(spatial_feat)  # [B*T, 7, d]
+        
+        time_feat = rearrange(spatial_feat, '(b t) p d-> b t p d', b=B, p=7)
+        # 注入时间位置编码
+        time_feat += self.time_position[:, :T, None, :]  # 广播到部件维度
+        time_feat = rearrange(time_feat, 'b t p d-> (b p) t d', b=B, p=7)
+        time_feat = self.time_transformer(time_feat)  # [T, B*7, d]
+        feature = rearrange(time_feat, '(b p) t d -> b t p d', b=B, p=7)
+        global_feat = feature[:, :, 0, :]  # 取第一个位置的特征
+        # 残差连接增强
+        return global_feat, rearrange(feature[:, :, 1:, :], 'b t p d -> p b t d', b=B)
+
+class TemporalDownsamplerV3(nn.Module):
+    """时间维度1/4降采样模块"""
+    def __init__(self, d_model):
+        super().__init__()
+        self.conv_layers = nn.Sequential(
+            nn.Conv1d(d_model, d_model, kernel_size=3, stride=2, padding=1),
+            nn.GELU(),
+            nn.Conv1d(d_model, d_model, kernel_size=3, stride=2, padding=1)
+        )
+        # self.norm = nn.LayerNorm(d_model)
+        
+    def forward(self, x):
+        """
+        输入形状: [B, T, C]
+        输出形状: [B, T//4, C]
+        """
+        x = x.permute(0, 2, 1)  # [B, C, T]
+        x = self.conv_layers(x)
+        x = x.permute(0, 2, 1)  # [B, T//4, C]
+        return x
+    
+class TemporalDownsamplerV4(nn.Module):
+    """时间维度1/4降采样模块"""
+    def __init__(self, d_model,
+                 down_t = 2,
+                 stride_t = 2,
+                 width = 512,
+                 depth = 3,
+                 dilation_growth_rate = 3,
+                 activation='relu',
+                 norm=None):
+        super().__init__()
+        blocks = []
+        filter_t, pad_t = stride_t * 2, stride_t // 2
+        blocks.append(nn.Conv1d(d_model, width, 3, 1, 1))
+        blocks.append(nn.ReLU())
+        for i in range(down_t):
+            input_dim = width
+            block = nn.Sequential(
+                nn.Conv1d(input_dim, width, filter_t, stride_t, pad_t),
+                Resnet1D(width, depth, dilation_growth_rate, activation=activation, norm=norm),
+            )
+            blocks.append(block)
+        blocks.append(nn.Conv1d(width, d_model, 3, 1, 1))
+        self.model = nn.Sequential(*blocks)
+        
+    def forward(self, x):
+        return self.model(x)
+
+class PositionalEncoding(nn.Module):
+    def __init__(self, channels, max_len=500):
+        """
+        Args:
+            channels (int): 输入特征的通道数（需与下采样输出通道一致）
+            max_len (int): 支持的最大时间步长
+        """
+        super().__init__()
+        
+        # 创建位置编码矩阵 (可扩展的缓冲区)
+        position = torch.arange(max_len).unsqueeze(1)                    # (max_len, 1)
+        div_term = torch.exp(
+            torch.arange(0, channels, 2).float() * 
+            (-math.log(10000.0) / channels)
+        )                                                                 # (channels//2,)
+        
+        pe = torch.zeros(max_len, channels)                              # (max_len, channels)
+        pe[:, 0::2] = torch.sin(position * div_term)                     # 偶数列使用正弦
+        pe[:, 1::2] = torch.cos(position * div_term)                     # 奇数列使用余弦
+        
+        # 注册为缓冲区（不参与训练）
+        self.register_buffer('pe', pe.unsqueeze(0).transpose(1, 2))       # (1, channels, max_len)
+
+    def forward(self, x):
+        """
+        Args:
+            x: 输入张量，形状 (batch_size, channels, time_steps)
+        Returns:
+            输出张量，形状与输入相同
+        """
+        x = x + self.pe[:, :, :x.size(2)]   # 动态截取所需时间步
+        return x
+
+# 全身空间的交互, 和时间的交互 vit结构作为encoder, 不做限制的transformer, 在V6版本基础上加入时间位置编码
+class EnhancedPartFusionV13(nn.Module):
+    def __init__(self,
+                 part_dims=[7,50,50,60,60,60],
+                 d_model=256,
+                 nhead=8,
+                 num_layers=4,
+                 causal=False,
+                 position=0,
+                 max_time_steps = 196,
+                 ):
+        super().__init__()
+        self.position = position
+        # 全身特征聚合Token
+        self.global_token = nn.Parameter(torch.randn(1, 1, d_model))
+        # 增强的位置编码体系
+        self.part_position = nn.Embedding(6, d_model)  # 部件类型编码
+        if position == 0:
+            pass
+        elif position == 1:
+            self.time_position = nn.Parameter(torch.randn(1, max_time_steps, d_model))  # 可学习时间编码
+        elif position == 2:
+            self.time_position = PositionalEncoding(d_model)
+        else:
+            raise ValueError('position参数错误')
+        self.time_downsampler = TemporalDownsamplerV4(d_model)
+        # 层级式特征投影
+        self.part_projs = nn.ModuleList([
+            DynamicProjection(dim, d_model) for dim in part_dims
+        ])
+        time_encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=4*d_model,
+            batch_first=True
+        )
+        if causal:
+            self.time_transformer = CausalTransformerEncoder(time_encoder_layer, num_layers=num_layers)
+        else:
+            self.time_transformer = nn.TransformerEncoder(time_encoder_layer, num_layers=num_layers)
+
+    def forward(self, parts_feature):
+        # 部件特征预处理
+        B, T = parts_feature[0].shape[0], parts_feature[0].shape[1]
+        
+        part_embeds = []
+        for i, (proj, feat) in enumerate(zip(self.part_projs, parts_feature)):
+            # 时间维度卷积处理
+            feat = feat.permute(0, 2, 1)  # [B, T, C] -> [B, C, T]
+            proj_feat = proj(feat.float()).permute(0, 2, 1)  # [B, T, d_model]
+            part_embeds.append(proj_feat)
+
+        # 构建时空特征立方体 [B, T, 6, d_model]
+        time_feat = torch.stack(part_embeds, dim=2)
+        time_feat = rearrange(time_feat, 'b t p d -> (b p) t d')
+        time_feat = self.time_downsampler(time_feat.permute(0, 2, 1)).permute(0, 2, 1)
+        if self.position == 1:
+            # time_feat = rearrange(time_feat, '(b p) t d -> b t p d')
+            time_feat += self.time_position[:, :T//4, :]
+        elif self.position == 2:
+            time_feat = self.time_position(time_feat.permute(0, 2, 1)).permute(0, 2, 1)
+        time_feat = self.time_transformer(time_feat)  # [B*7, T, d]
+        feature = rearrange(time_feat, '(b p) t d -> b t p d', b=B, p=6)
+        return feature, rearrange(feature, 'b t p d -> p b t d', b=B)
+
+class EnhancedPartFusionV14(nn.Module):
+    def __init__(self,
+                 part_dims=[7,50,50,60,60,60],
+                 d_model=256,
+                 nhead=8,
+                 num_layers=4,
+                 causal=False,
+                 position=0,
+                 max_time_steps = 196,
+                 ):
+        super().__init__()
+        self.position = position
+        if position == 0:
+            pass
+        elif position == 1:
+            self.time_position = nn.Parameter(torch.randn(1, max_time_steps, d_model))  # 可学习时间编码
+        elif position == 2:
+            self.time_position = PositionalEncoding(d_model)
+        else:
+            raise ValueError('position参数错误')
+        self.time_downsampler = TemporalDownsamplerV3(d_model)
+        # 层级式特征投影
+        self.part_projs = nn.ModuleList([
+            DynamicProjection(dim, d_model) for dim in part_dims
+        ])
+        time_encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=4*d_model,
+            batch_first=True
+        )
+        if causal:
+            self.time_transformer = CausalTransformerEncoder(time_encoder_layer, num_layers=num_layers)
+        else:
+            self.time_transformer = nn.TransformerEncoder(time_encoder_layer, num_layers=num_layers)
+
+    def forward(self, parts_feature):
+        # 部件特征预处理
+        B, T = parts_feature[0].shape[0], parts_feature[0].shape[1]
+        
+        part_embeds = []
+        for i, (proj, feat) in enumerate(zip(self.part_projs, parts_feature)):
+            # 时间维度卷积处理
+            feat = feat.permute(0, 2, 1)  # [B, T, C] -> [B, C, T]
+            proj_feat = proj(feat.float()).permute(0, 2, 1)  # [B, T, d_model]
+            part_embeds.append(proj_feat)
+
+        # 构建时空特征立方体 [B, T, 6, d_model]
+        time_feat = torch.stack(part_embeds, dim=2)
+        time_feat = rearrange(time_feat, 'b t p d -> (b p) t d')
+        time_feat = self.time_downsampler(time_feat)
+        if self.position == 1:
+            # time_feat = rearrange(time_feat, '(b p) t d -> b t p d')
+            time_feat += self.time_position[:, :T//4, :]
+        elif self.position == 2:
+            time_feat = self.time_position(time_feat.permute(0, 2, 1)).permute(0, 2, 1)
+        time_feat = self.time_transformer(time_feat)  # [B*7, T, d]
+        feature = rearrange(time_feat, '(b p) t d -> b t p d', b=B, p=6)
+        return feature, rearrange(feature, 'b t p d -> p b t d', b=B)
+
 
 class EnhancedVQVAE(nn.Module):
     def __init__(self, args,
@@ -1590,6 +2018,106 @@ class EnhancedVQVAEv9(EnhancedVQVAEv8):
     def forward(self, motion, text=None):
         return super().forward(motion, text)
 
+class EnhancedVQVAEv10(EnhancedVQVAEv5):
+    def __init__(self, args,
+                 d_model=256,
+                 ):
+        super().__init__(args, d_model=d_model)
+        self.cmt = EnhancedPartFusionV10(d_model=self.d_model, part_dims=self.part_dims, num_layers=args.num_layers)
+        for idx, name in enumerate(self.parts_name):
+            decoder = Decoder_wo_upsample(self.parts_input_dim[name], d_model, down_t=args.down_t, stride_t=args.stride_t, width=args.vqvae_arch_cfg['parts_hidden_dim'][name], depth=args.depth, dilation_growth_rate=args.dilation_growth_rate, activation=args.vq_act, norm=args.vq_norm)
+            setattr(self, f'dec_{name}', decoder)
+
+    def forward(self, motion, text=None):
+        return super().forward(motion, text)
+
+class EnhancedVQVAEv11(nn.Module):
+    def __init__(self, args,
+                 d_model=256,
+                 ):
+        super().__init__()
+        # 原始组件
+        self.args = args
+        self.parts_name = ['Root', 'R_Leg', 'L_Leg', 'Backbone', 'R_Arm', 'L_Arm']
+        if args.dataname == 't2m':
+            part_dims=[7,50,50,60,60,60]
+        else:
+            part_dims=[7,62,62,48,48,48]
+        self.part_dims = part_dims
+        self.d_model = d_model
+        # 新增模块
+        # self.cmt = EnhancedPartFusionV5(d_model=self.d_model, part_dims=part_dims, num_layers=args.num_layers)
+        for idx, name in enumerate(self.parts_name):
+            if args.dataname == 't2m':
+                self.parts_input_dim = {
+                'Root': 7,
+                'R_Leg': 50,
+                'L_Leg': 50,
+                'Backbone': 60,
+                'R_Arm': 60,
+                'L_Arm': 60,
+                }
+            elif args.dataname == 'kit':
+                self.parts_input_dim = {
+                'Root': 7,
+                'R_Leg': 62,
+                'L_Leg': 62,
+                'Backbone': 48,
+                'R_Arm': 48,
+                'L_Arm': 48,
+                }
+            # encoder降采样为0
+            encoder = Encoder(self.parts_input_dim[name], d_model, down_t=args.down_t, stride_t=1, width=args.vqvae_arch_cfg['parts_hidden_dim'][name], depth=args.depth, dilation_growth_rate=args.dilation_growth_rate, activation=args.vq_act, norm=args.vq_norm)
+            decoder = Decoder_wo_upsample(self.parts_input_dim[name], d_model, down_t=args.down_t, stride_t=args.stride_t, width=args.vqvae_arch_cfg['parts_hidden_dim'][name], depth=args.depth, dilation_growth_rate=args.dilation_growth_rate, activation=args.vq_act, norm=args.vq_norm)
+            quantizer = QuantizeEMAReset(args.vqvae_arch_cfg['parts_code_nb'][name], d_model, args)
+            setattr(self, f'dec_{name}', decoder)
+            setattr(self, f'quantizer_{name}', quantizer)
+            setattr(self, f'enc_{name}', encoder)
+
+    def forward(self, motion, text=None):
+        # 特征增强
+        # global_feature, fused_feat = self.cmt(motion)  # [B, seq, d_model]
+        # 原始编码流程
+        x_out_list = []
+        loss_list = []
+        perplexity_list = []
+        for idx, name in enumerate(self.parts_name):
+            encoder = getattr(self, f'enc_{name}')
+            quantizer = getattr(self, f'quantizer_{name}')
+            decoder = getattr(self, f'dec_{name}')
+            # x_encoder = fused_feat[idx, ...]
+            x_encoder = encoder(motion[idx].float().permute(0,2,1))
+            x_quantized, loss, perplexity = quantizer(x_encoder)
+            x_decoder = decoder(x_quantized)
+            x_out_list.append(rearrange(x_decoder, 'b d t -> b t d'))
+            loss_list.append(loss)
+            perplexity_list.append(perplexity)
+        
+        return x_out_list, loss_list, perplexity_list 
+
+class EnhancedVQVAEv12(EnhancedVQVAEv5):
+    def __init__(self, args,
+                 d_model=256,
+                 ):
+        super().__init__(args, d_model=d_model)
+        self.cmt = EnhancedPartFusionV12(d_model=self.d_model, part_dims=self.part_dims, num_layers=args.num_layers)
+        for idx, name in enumerate(self.parts_name):
+            decoder = Decoder_wo_upsample(self.parts_input_dim[name], d_model, down_t=args.down_t, stride_t=args.stride_t, width=args.vqvae_arch_cfg['parts_hidden_dim'][name], depth=args.depth, dilation_growth_rate=args.dilation_growth_rate, activation=args.vq_act, norm=args.vq_norm)
+            setattr(self, f'dec_{name}', decoder)
+
+    def forward(self, motion, text=None):
+        return super().forward(motion, text)
+
+class EnhancedVQVAEv13(EnhancedVQVAEv5):
+    def __init__(self, args,
+                 d_model=256,
+                 ):
+        super().__init__(args, d_model=d_model)
+        self.cmt = EnhancedPartFusionV13(d_model=self.d_model, part_dims=self.part_dims, num_layers=args.num_layers, position=args.position, causal=args.causal)
+
+    def forward(self, motion, text=None):
+        return super().forward(motion, text)
+
 class HumanVQVAETransformer(nn.Module):
     def __init__(self,
                  args,
@@ -1802,6 +2330,54 @@ class HumanVQVAETransformerV9(HumanVQVAETransformer):
     def __init__(self, args, **kwargs):
         super().__init__(args, **kwargs)
         self.enhancedvqvae = EnhancedVQVAEv9(args)
+        del self.tokenizer, self.text_encoder, self.vqvae
+
+    def forward(self, x, caption = None):
+        x_out_list, loss_list, perplexity_list = self.enhancedvqvae(x, caption)
+
+        return x_out_list, loss_list, perplexity_list, torch.tensor(0.0)
+    
+
+# Gesture Transformer完全版本
+class HumanVQVAETransformerV10(HumanVQVAETransformer):
+    def __init__(self, args, **kwargs):
+        super().__init__(args, **kwargs)
+        self.enhancedvqvae = EnhancedVQVAEv10(args)
+        del self.tokenizer, self.text_encoder, self.vqvae
+
+    def forward(self, x, caption = None):
+        x_out_list, loss_list, perplexity_list = self.enhancedvqvae(x, caption)
+
+        return x_out_list, loss_list, perplexity_list, torch.tensor(0.0)
+
+class HumanVQVAETransformerV11(HumanVQVAETransformer):
+    def __init__(self, args, **kwargs):
+        super().__init__(args, **kwargs)
+        self.enhancedvqvae = EnhancedVQVAEv11(args)
+        del self.tokenizer, self.text_encoder, self.vqvae
+
+    def forward(self, x, caption = None):
+        x_out_list, loss_list, perplexity_list = self.enhancedvqvae(x, caption)
+
+        return x_out_list, loss_list, perplexity_list, torch.tensor(0.0)
+
+# 完全使用transformer的encoder
+class HumanVQVAETransformerV12(HumanVQVAETransformer):
+    def __init__(self, args, **kwargs):
+        super().__init__(args, **kwargs)
+        self.enhancedvqvae = EnhancedVQVAEv12(args)
+        del self.tokenizer, self.text_encoder, self.vqvae
+
+    def forward(self, x, caption = None):
+        x_out_list, loss_list, perplexity_list = self.enhancedvqvae(x, caption)
+
+        return x_out_list, loss_list, perplexity_list, torch.tensor(0.0)
+
+# 只用时间交互的模型
+class HumanVQVAETransformerV13(HumanVQVAETransformer):
+    def __init__(self, args, **kwargs):
+        super().__init__(args, **kwargs)
+        self.enhancedvqvae = EnhancedVQVAEv13(args)
         del self.tokenizer, self.text_encoder, self.vqvae
 
     def forward(self, x, caption = None):

@@ -7,8 +7,7 @@ import torch
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
 
-# from dataset import dataset_VQ_bodypart_text, dataset_TM_eval_bodypart
-from dataset import dataset_VQ_bodypart_text_woclip, dataset_TM_eval_bodypart
+from dataset import dataset_VQ_bodypart_vqvae_eval, dataset_TM_eval_bodypart
 from models import rvqvae_bodypart as vqvae
 from models.evaluator_wrapper import EvaluatorModelWrapper
 
@@ -127,7 +126,7 @@ net = getattr(vqvae, f'HumanVQVAETransformerV{args.vision}')(args,  # use args t
         dilation_growth_rate=args.dilation_growth_rate,
         activation=args.vq_act,
         norm=args.vq_norm
-    )                          
+    )
 # net.load_checkpoint("output/00178-t2m-ParCo/VQVAE-ParCo-t2m-default/net_best_fid.pth")
 # net.load_checkpoint("output/00239-t2m-rvq_sem/VQVAE-rvq_sem-t2m-default/net_last.pth")
 # net.load_without_vqvae("output/00286-t2m-sem_plus/VQVAE-sem_plus-t2m-default/net_last.pth")
@@ -142,12 +141,12 @@ net.cuda()
 
 ##### ---- Dataloader ---- #####
 print('\n\n===> Constructing dataset and dataloader...\n\n')
-train_loader = dataset_VQ_bodypart_text_woclip.DATALoader(args.dataname,
+train_loader = dataset_VQ_bodypart_vqvae_eval.DATALoader(args, args.dataname,
                                         args.batch_size,
                                         window_size=args.window_size,
                                         unit_length=2**args.down_t)
 
-train_loader_iter = dataset_VQ_bodypart_text_woclip.cycle(train_loader)
+train_loader_iter = dataset_VQ_bodypart_vqvae_eval.cycle(train_loader)
 
 val_loader = dataset_TM_eval_bodypart.DATALoader(args.dataname, False,
                                         32,
@@ -188,15 +187,15 @@ for nb_iter in range(1, args.warm_up_iter):
     
     optimizer, current_lr = update_lr_warm_up(optimizer, nb_iter, args.warm_up_iter, args.lr)
 
-    gt_parts, text, text_id = next(train_loader_iter)
+    gt_parts, text, text_id, motion_len = next(train_loader_iter)
     for i in range(len(gt_parts)):
         gt_parts[i] = gt_parts[i].cuda().float()
 
     pred_parts, loss_commit_list, perplexity_list, contrastive_loss = net(gt_parts, text)
 
-    pred_parts_vel = dataset_VQ_bodypart_text_woclip.get_each_part_vel(
+    pred_parts_vel = dataset_VQ_bodypart_vqvae_eval.get_each_part_vel(
         pred_parts, mode=args.dataname)
-    gt_parts_vel = dataset_VQ_bodypart_text_woclip.get_each_part_vel(
+    gt_parts_vel = dataset_VQ_bodypart_vqvae_eval.get_each_part_vel(
         gt_parts, mode=args.dataname)
 
     loss_motion_list = Loss(pred_parts, gt_parts)  # parts motion reconstruction loss
@@ -243,15 +242,15 @@ avg_contrastive = 0.
 
 for nb_iter in range(1, args.total_iter + 1):
 
-    gt_parts, text, text_id = next(train_loader_iter)
+    gt_parts, text, text_id, motion_len = next(train_loader_iter)
     for i in range(len(gt_parts)):
         gt_parts[i] = gt_parts[i].cuda().float()
 
     pred_parts, loss_commit_list, perplexity_list, contrastive_loss = net(gt_parts, text)
 
-    pred_parts_vel = dataset_VQ_bodypart_text_woclip.get_each_part_vel(
+    pred_parts_vel = dataset_VQ_bodypart_vqvae_eval.get_each_part_vel(
         pred_parts, mode=args.dataname)
-    gt_parts_vel = dataset_VQ_bodypart_text_woclip.get_each_part_vel(
+    gt_parts_vel = dataset_VQ_bodypart_vqvae_eval.get_each_part_vel(
         gt_parts, mode=args.dataname)
 
     loss_motion_list = Loss(pred_parts, gt_parts)  # parts motion reconstruction loss

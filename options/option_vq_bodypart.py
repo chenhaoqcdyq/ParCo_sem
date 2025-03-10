@@ -117,6 +117,7 @@ def get_args_parser(args=None):
     parser.add_argument('--num-layers', type=int, default=2)
     parser.add_argument('--bodyconfig', type=bool, default=False)
     parser.add_argument('--causal', type=bool, default=False, help='causal squence')
+    parser.add_argument('--position', type=int, default=0, help='0:without pos 1:learnable 2:cos sin')
     
     ## quantizer
     parser.add_argument("--quantizer", type=str, default='ema_reset', choices = ['ema', 'orig', 'ema_reset', 'reset'], help="eps for optimal transport")

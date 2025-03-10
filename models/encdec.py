@@ -168,7 +168,10 @@ class Encoder(nn.Module):
         super().__init__()
         
         blocks = []
-        filter_t, pad_t = stride_t * 2, stride_t // 2
+        if stride_t == 1:
+            pad_t, filter_t = 1, 3
+        else:
+            filter_t, pad_t = stride_t * 2, stride_t // 2
         blocks.append(nn.Conv1d(input_emb_width, width, 3, 1, 1))
         blocks.append(nn.ReLU())
 
