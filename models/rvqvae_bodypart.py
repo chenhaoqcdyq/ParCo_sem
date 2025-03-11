@@ -1972,6 +1972,8 @@ class EnhancedVQVAEv5(nn.Module):
             x_encoder = fused_feat[idx, ...]
             x_quantized, loss, perplexity = quantizer(rearrange(x_encoder, 'b t d -> b d t'))
             x_decoder = decoder(x_quantized)
+            # if torch.any(torch.isnan(x_decoder)):
+            #     Exception('decoder output has nan')
             x_out_list.append(rearrange(x_decoder, 'b d t -> b t d'))
             loss_list.append(loss)
             perplexity_list.append(perplexity)
@@ -2129,6 +2131,16 @@ class EnhancedVQVAEv13(EnhancedVQVAEv5):
                  ):
         super().__init__(args, d_model=d_model)
         self.cmt = EnhancedPartFusionV13(d_model=self.d_model, part_dims=self.part_dims, num_layers=args.num_layers, position=args.position, causal=args.causal)
+
+    def forward(self, motion, text=None):
+        return super().forward(motion, text)
+
+class EnhancedVQVAEv14(EnhancedVQVAEv5):
+    def __init__(self, args,
+                 d_model=256,
+                 ):
+        super().__init__(args, d_model=d_model)
+        self.cmt = EnhancedPartFusionV14(d_model=self.d_model, part_dims=self.part_dims, num_layers=args.num_layers, position=args.position, causal=args.causal)
 
     def forward(self, motion, text=None):
         return super().forward(motion, text)
@@ -2393,6 +2405,18 @@ class HumanVQVAETransformerV13(HumanVQVAETransformer):
     def __init__(self, args, **kwargs):
         super().__init__(args, **kwargs)
         self.enhancedvqvae = EnhancedVQVAEv13(args)
+        del self.tokenizer, self.text_encoder, self.vqvae
+
+    def forward(self, x, caption = None):
+        x_out_list, loss_list, perplexity_list = self.enhancedvqvae(x, caption)
+
+        return x_out_list, loss_list, perplexity_list, torch.tensor(0.0)
+
+# 只用时间交互的模型
+class HumanVQVAETransformerV14(HumanVQVAETransformer):
+    def __init__(self, args, **kwargs):
+        super().__init__(args, **kwargs)
+        self.enhancedvqvae = EnhancedVQVAEv14(args)
         del self.tokenizer, self.text_encoder, self.vqvae
 
     def forward(self, x, caption = None):

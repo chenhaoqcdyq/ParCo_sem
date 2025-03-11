@@ -135,7 +135,7 @@ net = getattr(vqvae, f'HumanVQVAETransformerV{args.vision}')(args,  # use args t
 if args.resume_pth:
     logger.info('loading checkpoint from {}'.format(args.resume_pth))
     ckpt = torch.load(args.resume_pth, map_location='cpu')
-    net.load_state_dict(ckpt['net'], strict=True)
+    net.load_state_dict(ckpt['net'], strict=False)
 net.train()
 net.cuda()
 # net.eval()
@@ -266,6 +266,8 @@ for nb_iter in range(1, args.total_iter + 1):
     
     optimizer.zero_grad()
     loss.backward()
+    if args.clip_grad is not None:
+        torch.nn.utils.clip_grad_norm_(net.parameters(), args.clip_grad)
     optimizer.step()
     scheduler.step()
     

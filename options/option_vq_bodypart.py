@@ -95,6 +95,7 @@ def get_args_parser(args=None):
     parser.add_argument('--lr', default=2e-4, type=float, help='max learning rate')
     parser.add_argument('--lr-scheduler', default=[50000, 400000], nargs="+", type=int, help="learning rate schedule (iterations)")
     parser.add_argument('--gamma', default=0.05, type=float, help="learning rate decay")
+    parser.add_argument('--clip_grad', default=0.99, type=float, help='clip grad norm')
 
     parser.add_argument('--weight-decay', default=0.0, type=float, help='weight decay')
     parser.add_argument("--commit", type=float, default=0.02, help="hyper-parameter for the commitment loss")

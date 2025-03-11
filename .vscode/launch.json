@@ -106,8 +106,11 @@
         "--decoder_vision=1",
         "--num_quantizers=1",
         "--causal=False",
-        "--position=1",
-        "--num-layers=8"
+        "--position=2",
+        "--num-layers=8",
+        // "--eval-iter=100",
+        // "--warm-up-iter=100",
+        "--resume-pth=output/00455-t2m-v13_cos/VQVAE-v13_cos-t2m-default/net_last.pth"
         // "--resume-pth=output/00381-t2m-v6/VQVAE-v6-t2m-default/net_best_fid.pth"
         // "--resume-pth=output/00350-t2m-v4/VQVAE-v4-t2m-default/net_best_fid.pth"
         // "--resume-pth=output/00286-t2m-sem_plus/VQVAE-sem_plus-t2m-default/net_last.pth"
