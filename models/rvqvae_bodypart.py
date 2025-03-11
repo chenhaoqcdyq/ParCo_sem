@@ -2204,6 +2204,90 @@ class EnhancedVQVAEv15(EnhancedVQVAEv5):
 
     def forward(self, motion, text=None):
         return super().forward(motion, text)
+    
+class EnhancedVQVAEv16(EnhancedVQVAEv5):
+    def __init__(self, args,
+                 d_model=256,
+                 ):
+        super().__init__(args, d_model=d_model)
+        self.cmt = EnhancedPartFusionV16(d_model=self.d_model, part_dims=self.part_dims, num_layers=args.num_layers, position=args.position, causal=args.causal)
+
+    def forward(self, motion, text=None):
+        return super().forward(motion, text)
+
+# 全身空间的交互, 和时间的交互 vit结构作为encoder, 不做限制的transformer,与V6的区别是加了时间下采样
+class EnhancedPartFusionV16(nn.Module):
+    def __init__(self, 
+                 part_dims=[7,50,50,60,60,60],
+                 d_model=256,
+                 nhead=8,
+                 num_layers=4,
+                 position=1,
+                 causal=True):
+        super().__init__()
+        # 全身特征聚合Token
+        self.global_token = nn.Parameter(torch.randn(1, 1, d_model))
+        # 增强的位置编码体系
+        self.part_position = nn.Embedding(6, d_model)  # 部件类型编码
+        # 时间下采样模块
+        self.temporal_downsample = TemporalDownsamplerV4(d_model)
+        # 层级式特征投影
+        self.part_projs = nn.ModuleList([
+            DynamicProjection(dim, d_model) for dim in part_dims
+        ])
+        # 不带结构约束的空间Transformer
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=4*d_model,
+            batch_first=True,
+        )
+        time_encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=4*d_model,
+            batch_first=True
+        )
+        self.spatial_transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.time_transformer = CausalTransformerEncoder(time_encoder_layer, num_layers=num_layers)
+
+    def forward(self, parts_feature):
+        # 部件特征预处理
+        B, T = parts_feature[0].shape[0], parts_feature[0].shape[1]
+        
+        # 时空位置编码注入
+        part_embeds = []
+        for i, (proj, feat) in enumerate(zip(self.part_projs, parts_feature)):
+            # 时间维度卷积处理
+            feat = feat.permute(0, 2, 1)  # [B, T, C] -> [B, C, T]
+            proj_feat = proj(feat.float()).permute(0, 2, 1)  # [B, T, d_model]
+            
+            # 部件类型编码
+            part_embeds.append(proj_feat + self.part_position.weight[i][None, None, :])
+            
+        global_tokens = self.global_token.expand(B*T // 4, -1, -1)
+        
+        # 构建时空特征立方体 [B, T, 6, d_model]
+        spatial_cube = torch.stack(part_embeds, dim=2)
+        spatial_cube = self.temporal_downsample(rearrange(spatial_cube, 'b t p d -> (b p) d t'))
+        spatial_cube = rearrange(spatial_cube, '(b p) d t -> (b p) t d',b=B)
+        # 构建融合输入 [B*T, 7, d_model]（6个部件+1个全局Token）
+        fused_feat = torch.cat([
+            global_tokens,
+            rearrange(spatial_cube, '(b p) t d -> (b t) p d', b=B)
+        ], dim=1)
+        
+        # 空间维度交互 (部件间关系)        spatial_cube = spatial_cube + self.time_position[:, :T, :][None, :, None, :]
+        spatial_feat = rearrange(fused_feat, '(b t) p d-> (b t) p d', b=B, p=7)
+        
+        spatial_feat = self.spatial_transformer(spatial_feat)  # [B*T, 7, d]
+        
+        time_feat = rearrange(spatial_feat, '(b t) p d-> (b p) t d', b=B, p=7)
+        time_feat = self.time_transformer(time_feat)  # [T, B*7, d]
+        feature = rearrange(time_feat, '(b p) t d -> b t p d', b=B, p=7)
+        global_feat = feature[:, :, 0, :]  # 取第一个位置的特征
+        # 残差连接增强
+        return global_feat, rearrange(feature[:, :, 1:, :], 'b t p d -> p b t d', b=B)
 
 class HumanVQVAETransformer(nn.Module):
     def __init__(self,
@@ -2488,7 +2572,19 @@ class HumanVQVAETransformerV14(HumanVQVAETransformer):
 class HumanVQVAETransformerV15(HumanVQVAETransformer):
     def __init__(self, args, **kwargs):
         super().__init__(args, **kwargs)
-        self.enhancedvqvae = EnhancedVQVAEv15(args)
+        self.enhancedvqvae = EnhancedVQVAEv15(args, args.d_model)
+        del self.tokenizer, self.text_encoder, self.vqvae
+
+    def forward(self, x, caption = None):
+        x_out_list, loss_list, perplexity_list = self.enhancedvqvae(x, caption)
+
+        return x_out_list, loss_list, perplexity_list, torch.tensor(0.0)
+
+# 只用时间交互的模型
+class HumanVQVAETransformerV16(HumanVQVAETransformer):
+    def __init__(self, args, **kwargs):
+        super().__init__(args, **kwargs)
+        self.enhancedvqvae = EnhancedVQVAEv16(args, args.d_model)
         del self.tokenizer, self.text_encoder, self.vqvae
 
     def forward(self, x, caption = None):
