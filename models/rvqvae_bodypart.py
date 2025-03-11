@@ -1521,7 +1521,8 @@ class EnhancedPartFusionV13(nn.Module):
                  ):
         super().__init__()
         self.position = position
-
+        self.d_model = d_model
+        self.part_dims = part_dims
         if position == 0:
             pass
         elif position == 1:
@@ -1556,9 +1557,11 @@ class EnhancedPartFusionV13(nn.Module):
             feat = feat.permute(0, 2, 1)  # [B, T, C] -> [B, C, T]
             proj_feat = proj(feat.float()).permute(0, 2, 1)  # [B, T, d_model]
             part_embeds.append(proj_feat)
-
+        
         # 构建时空特征立方体 [B, T, 6, d_model]
         time_feat = torch.stack(part_embeds, dim=2)
+        if torch.any(torch.isnan(time_feat)):
+            print('nan in time_feat')
         time_feat = rearrange(time_feat, 'b t p d -> (b p) t d')
         time_feat = self.time_downsampler(time_feat.permute(0, 2, 1)).permute(0, 2, 1)
         if self.position == 1:
@@ -1568,6 +1571,8 @@ class EnhancedPartFusionV13(nn.Module):
             time_feat = self.time_position(time_feat.permute(0, 2, 1)).permute(0, 2, 1)
         time_feat = self.time_transformer(time_feat)  # [B*7, T, d]
         feature = rearrange(time_feat, '(b p) t d -> b t p d', b=B, p=6)
+        if torch.any(torch.isnan(feature)):
+            print('nan in feature')
         return feature, rearrange(feature, 'b t p d -> p b t d', b=B)
 
 class EnhancedPartFusionV14(nn.Module):
@@ -1648,6 +1653,49 @@ class EnhancedPartFusionV14(nn.Module):
         feature = rearrange(spatial_feature, '(b t) p d -> b t p d', b=B, p=6)
         return feature, rearrange(feature, 'b t p d -> p b t d', b=B)
 
+class DynamicProjectionV2(nn.Module):
+    """动态特征投影"""
+    def __init__(self, in_dim, d_model):
+        super().__init__()
+        self.base_proj = nn.Sequential(
+            nn.Conv1d(in_dim, d_model//2, 3, padding=1),
+            nn.GELU(),
+            nn.Conv1d(d_model//2, d_model, 3, padding=1),
+            nn.BatchNorm1d(d_model)
+        )
+        self.gate = nn.Sequential(
+            nn.AdaptiveAvgPool1d(1),
+            nn.LayerNorm([d_model, 1]),  # 新增 LayerNorm
+            nn.Conv1d(d_model, d_model, 1),
+            nn.Sigmoid()
+        )
+        self.reset_parameters()
+        
+    def reset_parameters(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv1d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+        
+    def forward(self, x):
+        base = self.base_proj(x)
+        gate = self.gate(base)
+        return base * gate
+
+
+# 全身空间的交互, 和时间的交互 vit结构作为encoder, 不做限制的transformer, 在V6版本基础上加入时间位置编码
+class EnhancedPartFusionV15(EnhancedPartFusionV13):
+    def __init__(self,
+                 **kwargs):
+        super().__init__(**kwargs)
+        # 层级式特征投影
+        self.part_projs = nn.ModuleList([
+            DynamicProjectionV2(dim, self.d_model) for dim in self.part_dims
+        ])
+
+    def forward(self, parts_feature):
+        return super().forward(parts_feature)
 
 class EnhancedVQVAE(nn.Module):
     def __init__(self, args,
@@ -1971,9 +2019,11 @@ class EnhancedVQVAEv5(nn.Module):
             decoder = getattr(self, f'dec_{name}')
             x_encoder = fused_feat[idx, ...]
             x_quantized, loss, perplexity = quantizer(rearrange(x_encoder, 'b t d -> b d t'))
+            if torch.any(torch.isnan(x_quantized)):
+                print('decoder output has nan')
             x_decoder = decoder(x_quantized)
-            # if torch.any(torch.isnan(x_decoder)):
-            #     Exception('decoder output has nan')
+            if torch.any(torch.isnan(x_decoder)):
+                print('decoder output has nan')
             x_out_list.append(rearrange(x_decoder, 'b d t -> b t d'))
             loss_list.append(loss)
             perplexity_list.append(perplexity)
@@ -2141,6 +2191,16 @@ class EnhancedVQVAEv14(EnhancedVQVAEv5):
                  ):
         super().__init__(args, d_model=d_model)
         self.cmt = EnhancedPartFusionV14(d_model=self.d_model, part_dims=self.part_dims, num_layers=args.num_layers, position=args.position, causal=args.causal)
+
+    def forward(self, motion, text=None):
+        return super().forward(motion, text)
+
+class EnhancedVQVAEv15(EnhancedVQVAEv5):
+    def __init__(self, args,
+                 d_model=256,
+                 ):
+        super().__init__(args, d_model=d_model)
+        self.cmt = EnhancedPartFusionV15(d_model=self.d_model, part_dims=self.part_dims, num_layers=args.num_layers, position=args.position, causal=args.causal)
 
     def forward(self, motion, text=None):
         return super().forward(motion, text)
@@ -2417,6 +2477,18 @@ class HumanVQVAETransformerV14(HumanVQVAETransformer):
     def __init__(self, args, **kwargs):
         super().__init__(args, **kwargs)
         self.enhancedvqvae = EnhancedVQVAEv14(args)
+        del self.tokenizer, self.text_encoder, self.vqvae
+
+    def forward(self, x, caption = None):
+        x_out_list, loss_list, perplexity_list = self.enhancedvqvae(x, caption)
+
+        return x_out_list, loss_list, perplexity_list, torch.tensor(0.0)
+
+# 只用时间交互的模型
+class HumanVQVAETransformerV15(HumanVQVAETransformer):
+    def __init__(self, args, **kwargs):
+        super().__init__(args, **kwargs)
+        self.enhancedvqvae = EnhancedVQVAEv15(args)
         del self.tokenizer, self.text_encoder, self.vqvae
 
     def forward(self, x, caption = None):
