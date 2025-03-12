@@ -2,6 +2,7 @@ import math
 import torch
 import torch.nn as nn
 from models.resnet import Resnet1D
+from models.vq_model_dual import Normalize, nonlinearity
 
 class PositionalEncoding(nn.Module):
     def __init__(self, src_dim, embed_dim, dropout, max_len=100, hid_dim=512):
@@ -199,7 +200,8 @@ class Decoder(nn.Module):
                  depth = 3,
                  dilation_growth_rate = 3, 
                  activation='relu',
-                 norm=None):
+                 norm=None,
+                 with_attn=False):
         super().__init__()
         blocks = []
         
@@ -208,11 +210,19 @@ class Decoder(nn.Module):
         blocks.append(nn.ReLU())
         for i in range(down_t):
             out_dim = width
-            block = nn.Sequential(
-                Resnet1D(width, depth, dilation_growth_rate, reverse_dilation=True, activation=activation, norm=norm),
-                nn.Upsample(scale_factor=2, mode='nearest'),
-                nn.Conv1d(width, out_dim, 3, 1, 1)
-            )
+            if with_attn:
+                block = nn.Sequential(
+                    Resnet1D(width, depth, dilation_growth_rate, reverse_dilation=True, activation=activation, norm=norm),
+                    MotionAttention(width, num_heads=8),
+                    nn.Upsample(scale_factor=2, mode='nearest'),
+                    nn.Conv1d(width, out_dim, 3, 1, 1)
+                )
+            else:
+                block = nn.Sequential(
+                    Resnet1D(width, depth, dilation_growth_rate, reverse_dilation=True, activation=activation, norm=norm),
+                    nn.Upsample(scale_factor=2, mode='nearest'),
+                    nn.Conv1d(width, out_dim, 3, 1, 1)
+                )
             blocks.append(block)
         blocks.append(nn.Conv1d(width, width, 3, 1, 1))
         blocks.append(nn.ReLU())
@@ -232,20 +242,28 @@ class Decoder_wo_upsample(nn.Module):
                  depth = 3,
                  dilation_growth_rate = 3, 
                  activation='relu',
-                 norm=None):
+                 norm=None,
+                 with_attn=False):
         super().__init__()
         blocks = []
         
         filter_t, pad_t = stride_t * 2, stride_t // 2
+        self.with_attn = with_attn
         blocks.append(nn.Conv1d(output_emb_width, width, 3, 1, 1))
         blocks.append(nn.ReLU())
         for i in range(down_t):
             out_dim = width
-            block = nn.Sequential(
-                Resnet1D(width, depth, dilation_growth_rate, reverse_dilation=True, activation=activation, norm=norm),
-                # nn.Upsample(scale_factor=2, mode='nearest'),
-                nn.Conv1d(width, out_dim, 3, 1, 1)
-            )
+            if self.with_attn:
+                block = nn.Sequential(
+                    Resnet1D(width, depth, dilation_growth_rate, reverse_dilation=True, activation=activation, norm=norm),
+                    MotionAttention(width, num_heads=8),
+                    nn.Conv1d(width, out_dim, 3, 1, 1)
+                )
+            else:
+                block = nn.Sequential(
+                    Resnet1D(width, depth, dilation_growth_rate, reverse_dilation=True, activation=activation, norm=norm),
+                    nn.Conv1d(width, out_dim, 3, 1, 1)
+                )
             blocks.append(block)
         blocks.append(nn.Conv1d(width, width, 3, 1, 1))
         blocks.append(nn.ReLU())
@@ -254,3 +272,126 @@ class Decoder_wo_upsample(nn.Module):
 
     def forward(self, x):
         return self.model(x)
+
+class Upsample(nn.Module):
+    def __init__(self, in_channels, with_conv):
+        super().__init__()
+        self.with_conv = with_conv
+        if self.with_conv:
+            self.conv = nn.Conv1d(in_channels, in_channels, kernel_size=3, stride=1, padding=1)
+
+    def forward(self, x):
+        x = F.interpolate(x, scale_factor=2.0, mode="nearest")
+        if self.with_conv:
+            x = self.conv(x)
+        return x
+
+
+class TemporalResBlock(nn.Module):
+    """时间维度残差块（1D卷积版本）"""
+    def __init__(self, dim, expansion=4, dropout=0.1):
+        super().__init__()
+        hidden_dim = dim * expansion
+        self.norm1 = nn.LayerNorm(dim)
+        self.conv1 = nn.Conv1d(dim, hidden_dim, kernel_size=3, padding=1)
+        self.norm2 = nn.LayerNorm(hidden_dim)
+        self.conv2 = nn.Conv1d(hidden_dim, dim, kernel_size=3, padding=1)
+        self.dropout = nn.Dropout(dropout)
+        
+    def forward(self, x):
+        # x: (B, L, D)
+        residual = x
+        x = self.norm1(x)
+        x = x.permute(0, 2, 1)  # (B, D, L)
+        x = F.gelu(self.conv1(x))
+        x = self.norm2(x.permute(0, 2, 1)).permute(0, 2, 1)
+        x = self.dropout(x)
+        x = self.conv2(x).permute(0, 2, 1)  # (B, L, D)
+        return residual + x
+
+class MotionAttention(nn.Module):
+    """运动序列注意力机制"""
+    def __init__(self, dim, num_heads=4, residual=True):
+        super().__init__()
+        self.num_heads = num_heads
+        self.scale = (dim // num_heads) ** -0.5
+        self.residual = residual
+        self.to_qkv = nn.Linear(dim, dim * 3)
+        self.proj = nn.Linear(dim, dim)
+        
+    def forward(self, x):
+        x = x.permute(0, 2, 1)  # (B, D, L)
+        B, L, D = x.shape
+        residual_x = x
+        qkv = self.to_qkv(x).chunk(3, dim=-1)
+        q, k, v = map(lambda t: t.reshape(B, L, self.num_heads, -1).permute(0, 2, 1, 3), qkv)
+        
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        attn = attn.softmax(dim=-1)
+        
+        x = (attn @ v).permute(0, 2, 1, 3).reshape(B, L, D)
+        if self.residual:
+            result = self.proj(x) + residual_x
+        else:
+            result = self.proj(x)
+        return result.permute(0, 2, 1)
+
+class MotionDecoder(nn.Module):
+    def __init__(self, 
+                 input_dim=256,
+                 output_dim=45,  # 例如人体关节的3D坐标
+                 seq_len=196,     # 基础序列长度
+                 dim=512,
+                 num_layers=6,
+                 num_heads=8,
+                 expansion=4,
+                 dropout=0.1):
+        super().__init__()
+        
+        # 初始投影
+        self.init_proj = nn.Linear(input_dim, dim)
+        
+        # 时间位置编码
+        self.pos_embed = nn.Parameter(torch.randn(1, seq_len, dim))
+        
+        # 解码层堆叠
+        self.layers = nn.ModuleList([
+            nn.ModuleDict({
+                "res_block": TemporalResBlock(dim, expansion, dropout),
+                "attn": MotionAttention(dim, num_heads),
+                "norm": nn.LayerNorm(dim)
+            }) for _ in range(num_layers)
+        ])
+        
+        # 输出层
+        self.final_norm = nn.LayerNorm(dim)
+        self.output_proj = nn.Linear(dim, output_dim)
+        
+    def forward(self, x):
+        """
+        Args:
+            x: 输入序列 (B, L, D_in)
+        Returns:
+            out: 解码序列 (B, L, D_out)
+        """
+        B, L, _ = x.shape
+        
+        # 初始投影
+        x = self.init_proj(x)  # (B, L, D)
+        
+        # 添加位置编码
+        x += self.pos_embed[:, :L]
+        
+        # 通过各层
+        for layer in self.layers:
+            # 残差连接
+            residual = x
+            x = layer["res_block"](x)
+            x = layer["attn"](x) + residual
+            
+            # 层归一化
+            x = layer["norm"](x)
+        
+        # 最终输出
+        x = self.final_norm(x)
+        return self.output_proj(x)

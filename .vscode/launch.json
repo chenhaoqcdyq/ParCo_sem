@@ -108,7 +108,8 @@
         "--causal=True",
         "--position=1",
         "--num-layers=4",
-        "--d_model=512"
+        "--d_model=512",
+        "--with_attn=True",
         // "--eval-iter=100",
         // "--warm-up-iter=100",
         // "--resume-pth=output/00449-t2m-v13_cos/VQVAE-v13_cos-t2m-default/net_last.pth"
@@ -122,7 +123,7 @@
       "env": {
         "PYTHONPATH": "${workspaceFolder}/..:${env:PYTHONPATH}",
         "TORCH_DISTRIBUTED_DEBUG": "INFO",
-        "CUDA_VISIBLE_DEVICES": "1",
+        "CUDA_VISIBLE_DEVICES": "0",
         "TOKENIZERS_PARALLELISM": "false"
       }
     }

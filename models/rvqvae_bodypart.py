@@ -1752,8 +1752,8 @@ class EnhancedPartFusionV16(nn.Module):
         
         # 构建时空特征立方体 [B, T, 6, d_model]
         spatial_cube = torch.stack(part_embeds, dim=2)
-        spatial_cube = self.temporal_downsample(rearrange(spatial_cube, 'b t p d -> (b p) d t'))
-        spatial_cube = rearrange(spatial_cube, '(b p) d t -> (b p) t d',b=B)
+        spatial_cube = self.temporal_downsample(rearrange(spatial_cube, 'b t p d -> (b p) t d'))
+        # spatial_cube = rearrange(spatial_cube, '(b p) t d -> (b p) t d',b=B)
         # 构建融合输入 [B*T, 7, d_model]（6个部件+1个全局Token）
         fused_feat = torch.cat([
             global_tokens,
@@ -2077,7 +2077,7 @@ class EnhancedVQVAEv5(nn.Module):
                 'R_Arm': 48,
                 'L_Arm': 48,
                 }
-            decoder = Decoder(self.parts_input_dim[name], d_model, down_t=args.down_t, stride_t=args.stride_t, width=args.vqvae_arch_cfg['parts_hidden_dim'][name], depth=args.depth, dilation_growth_rate=args.dilation_growth_rate, activation=args.vq_act, norm=args.vq_norm)
+            decoder = Decoder(self.parts_input_dim[name], d_model, down_t=args.down_t, stride_t=args.stride_t, width=args.vqvae_arch_cfg['parts_hidden_dim'][name], depth=args.depth, dilation_growth_rate=args.dilation_growth_rate, activation=args.vq_act, norm=args.vq_norm, with_attn=args.with_attn)
             quantizer = QuantizeEMAReset(args.vqvae_arch_cfg['parts_code_nb'][name], d_model, args)
             setattr(self, f'dec_{name}', decoder)
             setattr(self, f'quantizer_{name}', quantizer)
@@ -2110,7 +2110,7 @@ class EnhancedVQVAEv6(EnhancedVQVAEv5):
                  d_model=256,
                  ):
         super().__init__(args, d_model=d_model)
-        self.cmt = EnhancedPartFusionV6(d_model=self.d_model, part_dims=self.part_dims, num_layers=args.num_layers)
+        self.cmt = EnhancedPartFusionV6(d_model=d_model, part_dims=self.part_dims, num_layers=args.num_layers)
         for idx, name in enumerate(self.parts_name):
             decoder = Decoder_wo_upsample(self.parts_input_dim[name], d_model, down_t=args.down_t, stride_t=args.stride_t, width=args.vqvae_arch_cfg['parts_hidden_dim'][name], depth=args.depth, dilation_growth_rate=args.dilation_growth_rate, activation=args.vq_act, norm=args.vq_norm)
             setattr(self, f'dec_{name}', decoder)
@@ -2210,7 +2210,7 @@ class EnhancedVQVAEv11(nn.Module):
                 }
             # encoder降采样为0
             encoder = Encoder(self.parts_input_dim[name], d_model, down_t=args.down_t, stride_t=1, width=args.vqvae_arch_cfg['parts_hidden_dim'][name], depth=args.depth, dilation_growth_rate=args.dilation_growth_rate, activation=args.vq_act, norm=args.vq_norm)
-            decoder = Decoder_wo_upsample(self.parts_input_dim[name], d_model, down_t=args.down_t, stride_t=args.stride_t, width=args.vqvae_arch_cfg['parts_hidden_dim'][name], depth=args.depth, dilation_growth_rate=args.dilation_growth_rate, activation=args.vq_act, norm=args.vq_norm)
+            decoder = Decoder_wo_upsample(self.parts_input_dim[name], d_model, down_t=args.down_t, stride_t=args.stride_t, width=args.vqvae_arch_cfg['parts_hidden_dim'][name], depth=args.depth, dilation_growth_rate=args.dilation_growth_rate, activation=args.vq_act, norm=args.vq_norm, with_attn=args.with_attn)
             quantizer = QuantizeEMAReset(args.vqvae_arch_cfg['parts_code_nb'][name], d_model, args)
             setattr(self, f'dec_{name}', decoder)
             setattr(self, f'quantizer_{name}', quantizer)
@@ -2467,7 +2467,7 @@ class HumanVQVAETransformerV5(HumanVQVAETransformer):
 class HumanVQVAETransformerV6(HumanVQVAETransformer):
     def __init__(self, args, **kwargs):
         super().__init__(args, **kwargs)
-        self.enhancedvqvae = EnhancedVQVAEv6(args)
+        self.enhancedvqvae = EnhancedVQVAEv6(args, args.d_model)
         del self.tokenizer, self.text_encoder, self.vqvae
 
     def forward(self, x, caption = None):
