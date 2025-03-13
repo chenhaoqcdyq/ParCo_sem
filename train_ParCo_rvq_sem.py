@@ -7,8 +7,8 @@ import torch
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
 
-# from dataset import dataset_VQ_bodypart_text, dataset_TM_eval_bodypart
-from dataset import dataset_VQ_bodypart_text_woclip, dataset_TM_eval_bodypart
+from dataset import dataset_VQ_bodypart_text, dataset_TM_eval_bodypart
+# from dataset import dataset_VQ_bodypart_text_woclip, dataset_TM_eval_bodypart
 from models import rvqvae_bodypart as vqvae
 from models.evaluator_wrapper import EvaluatorModelWrapper
 
@@ -142,12 +142,12 @@ net.cuda()
 
 ##### ---- Dataloader ---- #####
 print('\n\n===> Constructing dataset and dataloader...\n\n')
-train_loader = dataset_VQ_bodypart_text_woclip.DATALoader(args.dataname,
+train_loader = dataset_VQ_bodypart_text.DATALoader(args.dataname,
                                         args.batch_size,
                                         window_size=args.window_size,
                                         unit_length=2**args.down_t)
 
-train_loader_iter = dataset_VQ_bodypart_text_woclip.cycle(train_loader)
+train_loader_iter = dataset_VQ_bodypart_text.cycle(train_loader)
 
 val_loader = dataset_TM_eval_bodypart.DATALoader(args.dataname, False,
                                         32,
@@ -183,20 +183,32 @@ Loss = losses.ReConsLossBodyPart(args.recons_loss, args.nb_joints)
 print('\n===> Start warm-up training\n\n')
 
 avg_recons, avg_perplexity, avg_commit = 0., 0., 0.
-avg_contrastive = 0.
+avg_contrastive, avg_disentangle = 0., 0.
 for nb_iter in range(1, args.warm_up_iter):
     
     optimizer, current_lr = update_lr_warm_up(optimizer, nb_iter, args.warm_up_iter, args.lr)
-
-    gt_parts, text, text_id = next(train_loader_iter)
+    try:
+        gt_parts, text, text_token, text_feature, text_feature_all, text_id = next(train_loader_iter)
+    except:
+        gt_parts, text, text_id = next(train_loader_iter)
     for i in range(len(gt_parts)):
         gt_parts[i] = gt_parts[i].cuda().float()
 
-    pred_parts, loss_commit_list, perplexity_list, contrastive_loss = net(gt_parts, text)
-
-    pred_parts_vel = dataset_VQ_bodypart_text_woclip.get_each_part_vel(
+    if args.vision == 17:
+        cond = [text_feature, text_id]
+    else:
+        cond = text
+    pred_parts, loss_commit_list, perplexity_list, loss_extend = net(gt_parts, cond)
+    # contrastive_loss = loss_extend['contrastive']
+    if isinstance(loss_extend, list):
+        contrastive_loss = loss_extend[0]
+        disentangle_loss = losses.gather_loss_list(loss_extend[1])
+    else:
+        contrastive_loss = loss_extend
+        disentangle_loss = torch.tensor(0.0).cuda()
+    pred_parts_vel = dataset_VQ_bodypart_text.get_each_part_vel(
         pred_parts, mode=args.dataname)
-    gt_parts_vel = dataset_VQ_bodypart_text_woclip.get_each_part_vel(
+    gt_parts_vel = dataset_VQ_bodypart_text.get_each_part_vel(
         gt_parts, mode=args.dataname)
 
     loss_motion_list = Loss(pred_parts, gt_parts)  # parts motion reconstruction loss
@@ -206,7 +218,7 @@ for nb_iter in range(1, args.warm_up_iter):
     loss_commit = losses.gather_loss_list(loss_commit_list)
     loss_vel = losses.gather_loss_list(loss_vel_list)
 
-    loss = loss_motion + args.commit * loss_commit + args.loss_vel * loss_vel + contrastive_loss
+    loss = loss_motion + args.commit * loss_commit + args.loss_vel * loss_vel + contrastive_loss + disentangle_loss
 
 
     optimizer.zero_grad()
@@ -218,17 +230,19 @@ for nb_iter in range(1, args.warm_up_iter):
     avg_perplexity += perplexity.item()
     avg_commit += loss_commit.item()
     avg_contrastive += contrastive_loss.item()
+    avg_disentangle += disentangle_loss.item()
     
     if nb_iter % args.print_iter == 0:
         avg_recons /= args.print_iter
         avg_perplexity /= args.print_iter
         avg_commit /= args.print_iter
         avg_contrastive /= args.print_iter
+        avg_disentangle /= args.print_iter
         
         logger.info(f"Warmup. Iter {nb_iter} :  lr {current_lr:.5f} \t Commit. {avg_commit:.5f} \t PPL. {avg_perplexity:.2f} \t Recons.  {avg_recons:.5f}")
-        logger.info(f"Contrastive loss: {avg_contrastive:.5f}")
+        logger.info(f"Contrastive loss: {avg_contrastive:.5f} \t Disentangle loss: {avg_disentangle:.5f}")
         avg_recons, avg_perplexity, avg_commit = 0., 0., 0.
-        avg_contrastive = 0.
+        avg_contrastive, avg_disentangle = 0., 0.
 
 best_fid, best_iter, best_div, best_top1, best_top2, best_top3, best_matching, writer, logger, best_mpjpe = \
     eval_bodypart.evaluation_vqvae(
@@ -239,19 +253,30 @@ best_fid, best_iter, best_div, best_top1, best_top2, best_top3, best_matching, w
 ##### ---- Training ---- #####
 print('\n\n===> Start training\n\n')
 avg_recons, avg_perplexity, avg_commit = 0., 0., 0.
-avg_contrastive = 0.
+avg_contrastive, avg_disentangle = 0., 0.
 
 for nb_iter in range(1, args.total_iter + 1):
 
-    gt_parts, text, text_id = next(train_loader_iter)
+    try:
+        gt_parts, text, text_token, text_feature, text_feature_all, text_id = next(train_loader_iter)
+    except:
+        gt_parts, text, text_id = next(train_loader_iter)
     for i in range(len(gt_parts)):
         gt_parts[i] = gt_parts[i].cuda().float()
-
-    pred_parts, loss_commit_list, perplexity_list, contrastive_loss = net(gt_parts, text)
-
-    pred_parts_vel = dataset_VQ_bodypart_text_woclip.get_each_part_vel(
+    if args.vision == 17:
+        cond = [text_feature, text_id]
+    else:
+        cond = text
+    pred_parts, loss_commit_list, perplexity_list, loss_extend = net(gt_parts, cond)
+    if isinstance(loss_extend, list):
+        contrastive_loss = loss_extend[0]
+        disentangle_loss = losses.gather_loss_list(loss_extend[1])
+    else:
+        contrastive_loss = loss_extend
+        disentangle_loss = torch.tensor(0.0).cuda()
+    pred_parts_vel = dataset_VQ_bodypart_text.get_each_part_vel(
         pred_parts, mode=args.dataname)
-    gt_parts_vel = dataset_VQ_bodypart_text_woclip.get_each_part_vel(
+    gt_parts_vel = dataset_VQ_bodypart_text.get_each_part_vel(
         gt_parts, mode=args.dataname)
 
     loss_motion_list = Loss(pred_parts, gt_parts)  # parts motion reconstruction loss
@@ -262,7 +287,7 @@ for nb_iter in range(1, args.total_iter + 1):
     loss_commit = losses.gather_loss_list(loss_commit_list)
     loss_vel = losses.gather_loss_list(loss_vel_list)
 
-    loss = loss_motion + args.commit * loss_commit + args.loss_vel * loss_vel + contrastive_loss
+    loss = loss_motion + args.commit * loss_commit + args.loss_vel * loss_vel + contrastive_loss + disentangle_loss
     
     optimizer.zero_grad()
     loss.backward()
@@ -276,12 +301,14 @@ for nb_iter in range(1, args.total_iter + 1):
     avg_perplexity += perplexity.item()
     avg_commit += loss_commit.item()
     avg_contrastive += contrastive_loss.item()
+    avg_disentangle += disentangle_loss.item()
     
     if nb_iter % args.print_iter == 0:
         avg_recons /= args.print_iter
         avg_perplexity /= args.print_iter
         avg_commit /= args.print_iter
         avg_contrastive /= args.print_iter
+        avg_disentangle /= args.print_iter
         
         writer.add_scalar('./Train/L1', avg_recons, nb_iter)
         writer.add_scalar('./Train/PPL', avg_perplexity, nb_iter)
@@ -289,10 +316,10 @@ for nb_iter in range(1, args.total_iter + 1):
         writer.add_scalar('./Train/Contrastive', avg_contrastive, nb_iter)
         
         logger.info(f"Train. Iter {nb_iter} : \t Commit. {avg_commit:.5f} \t PPL. {avg_perplexity:.2f} \t Recons.  {avg_recons:.5f}")
-        logger.info(f"Contrastive loss: {avg_contrastive:.5f}")
+        logger.info(f"Contrastive loss: {avg_contrastive:.5f} \t Disentangle loss: {avg_disentangle:.5f}")
         
         avg_recons, avg_perplexity, avg_commit = 0., 0., 0.,
-        avg_contrastive = 0.
+        avg_contrastive, avg_disentangle = 0., 0.
 
     if nb_iter % args.eval_iter == 0:
         best_fid, best_iter, best_div, best_top1, best_top2, best_top3, best_matching, writer, logger, best_mpjpe = \

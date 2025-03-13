@@ -434,6 +434,59 @@ class ContrastiveLossWithSTS(nn.Module):
         
         return (loss_motion + loss_text) / 2
 
+class ContrastiveLossWithSTSV2(nn.Module):
+    def __init__(self, temperature=0.07):
+        super().__init__()
+        self.temperature = temperature
+
+    def forward(self, motion_feat, text_feat, text_id):
+        """
+        motion_feat: [B, D] 动作特征
+        text_feat: [B, D] 文本特征
+        texts: List[str] 原始文本
+        """
+        pos_mask = torch.zeros(len(text_id), len(text_id), device=motion_feat.device)
+        for i in range(len(text_id)):
+            for j in range(len(text_id)):
+                if text_id[i] == text_id[j]:
+                    pos_mask[i, j] = 1
+        # 特征归一化
+        motion_feat = F.normalize(motion_feat, dim=-1)
+        text_feat = F.normalize(text_feat, dim=-1)
+        
+        # 计算logits
+        logits_per_motion = torch.mm(motion_feat, text_feat.T) / self.temperature  # [B, B]
+        logits_per_text = logits_per_motion.T
+        
+        # 多正样本对比损失
+        exp_logits = torch.exp(logits_per_motion)
+        numerator = torch.sum(exp_logits * pos_mask, dim=1)  # 分子：正样本相似度
+        denominator = torch.sum(exp_logits, dim=1)          # 分母：所有样本
+        
+        # 避免除零
+        valid_pos = (pos_mask.sum(dim=1) > 0)
+        loss_motion = -torch.log(numerator[valid_pos]/denominator[valid_pos]).sum()
+        
+        # 对称文本到动作损失
+        exp_logits_text = torch.exp(logits_per_text)
+        numerator_text = torch.sum(exp_logits_text * pos_mask, dim=1)
+        denominator_text = torch.sum(exp_logits_text, dim=1)
+        loss_text = -torch.log(numerator_text[valid_pos]/denominator_text[valid_pos]).sum()
+        
+        return (loss_motion + loss_text) / 2
+    
+    def compute_disentangle_loss(self, quant_vis, quant_sem, disentanglement_ratio=1):
+        quant_vis = rearrange(quant_vis, 'b t c -> (b t) c')
+        quant_sem = rearrange(quant_sem, 'b t c -> (b t) c')
+
+        quant_vis = F.normalize(quant_vis, p=2, dim=-1)
+        quant_sem = F.normalize(quant_sem, p=2, dim=-1)
+
+        dot_product = torch.sum(quant_vis * quant_sem, dim=1)
+        loss = torch.mean(dot_product ** 2) * disentanglement_ratio
+
+        return loss
+
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.manifold import TSNE
@@ -1773,80 +1826,87 @@ class EnhancedPartFusionV16(nn.Module):
         return global_feat, rearrange(feature[:, :, 1:, :], 'b t p d -> p b t d', b=B)
 
 
-
-# 全身空间的交互, 和时间的交互 vit结构作为encoder, 不做限制的transformer
+# 在V6版本上加入全局特征学习
 class EnhancedPartFusionV17(nn.Module):
-    def __init__(self, 
+    def __init__(self,
                  part_dims=[7,50,50,60,60,60],
                  d_model=256,
                  nhead=8,
                  num_layers=4,
-                 position=1,
-                 causal=True):
+                 causal=False,
+                 position=0,
+                 max_time_steps = 196,
+                 ):
         super().__init__()
+        self.position = position
+        self.d_model = d_model
+        self.part_dims = part_dims
         # 全身特征聚合Token
         self.global_token = nn.Parameter(torch.randn(1, 1, d_model))
         # 增强的位置编码体系
         self.part_position = nn.Embedding(6, d_model)  # 部件类型编码
-        # 时间下采样模块
-        self.temporal_downsample = TemporalDownsamplerV2(d_model)
+        
+        if position == 0:
+            pass
+        elif position == 1:
+            self.time_position = nn.Parameter(torch.randn(1, max_time_steps, d_model))  # 可学习时间编码
+        elif position == 2:
+            self.time_position = PositionalEncoding(d_model)
+        else:
+            raise ValueError('position参数错误')
         # 层级式特征投影
         self.part_projs = nn.ModuleList([
             DynamicProjection(dim, d_model) for dim in part_dims
         ])
-        # 不带结构约束的空间Transformer
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model,
-            nhead=nhead,
-            dim_feedforward=4*d_model,
-            batch_first=True,
-        )
         time_encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=nhead,
             dim_feedforward=4*d_model,
             batch_first=True
         )
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=4*d_model,
+            batch_first=True,
+        )
         self.spatial_transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-        self.time_transformer = CausalTransformerEncoder(time_encoder_layer, num_layers=num_layers)
-
+        if causal:
+            self.time_transformer = CausalTransformerEncoder(time_encoder_layer, num_layers=num_layers)
+        else:
+            self.time_transformer = nn.TransformerEncoder(time_encoder_layer, num_layers=num_layers)
+        
     def forward(self, parts_feature):
         # 部件特征预处理
         B, T = parts_feature[0].shape[0], parts_feature[0].shape[1]
         
-        # 时空位置编码注入
         part_embeds = []
         for i, (proj, feat) in enumerate(zip(self.part_projs, parts_feature)):
             # 时间维度卷积处理
             feat = feat.permute(0, 2, 1)  # [B, T, C] -> [B, C, T]
             proj_feat = proj(feat.float()).permute(0, 2, 1)  # [B, T, d_model]
+            part_embeds.append(proj_feat)
             
-            # 部件类型编码
-            part_embeds.append(proj_feat + self.part_position.weight[i][None, None, :])
-            
-        global_tokens = self.global_token.expand(B*T // 4, -1, -1)
-        
+        global_tokens = self.global_token.expand(B*T, -1, -1)
         # 构建时空特征立方体 [B, T, 6, d_model]
         spatial_cube = torch.stack(part_embeds, dim=2)
-        spatial_cube = self.temporal_downsample(rearrange(spatial_cube, 'b t p d -> (b p) t d'))
-        # spatial_cube = rearrange(spatial_cube, '(b p) t d -> (b p) t d',b=B)
         # 构建融合输入 [B*T, 7, d_model]（6个部件+1个全局Token）
         fused_feat = torch.cat([
             global_tokens,
-            rearrange(spatial_cube, '(b p) t d -> (b t) p d', b=B)
+            rearrange(spatial_cube, 'b t p d -> (b t) p d', b=B)
         ], dim=1)
-        
-        # 空间维度交互 (部件间关系)        spatial_cube = spatial_cube + self.time_position[:, :T, :][None, :, None, :]
-        spatial_feat = rearrange(fused_feat, '(b t) p d-> (b t) p d', b=B, p=7)
-        
-        spatial_feat = self.spatial_transformer(spatial_feat)  # [B*T, 7, d]
-        
-        time_feat = rearrange(spatial_feat, '(b t) p d-> (b p) t d', b=B, p=7)
-        time_feat = self.time_transformer(time_feat)  # [T, B*7, d]
+        # 空间交互
+        fused_feat = self.spatial_transformer(fused_feat)
+        time_feat = rearrange(fused_feat, '(b t) p d -> (b p) t d', b=B)
+        if self.position == 1:
+            time_feat += self.time_position[:, :T, :]
+        elif self.position == 2:
+            time_feat = self.time_position(time_feat.permute(0, 2, 1)).permute(0, 2, 1)
+        time_feat = self.time_transformer(time_feat)  # [B*7, T, d]
         feature = rearrange(time_feat, '(b p) t d -> b t p d', b=B, p=7)
-        global_feat = feature[:, :, 0, :]  # 取第一个位置的特征
-        # 残差连接增强
-        return global_feat, rearrange(feature[:, :, 1:, :], 'b t p d -> p b t d', b=B)
+        global_feature = feature[:, :, 0, :]  # 取第一个位置的特征
+        
+        return global_feature, rearrange(feature[:, :, 1:, :], 'b t p d -> p b t d', b=B)
 
 class EnhancedVQVAE(nn.Module):
     def __init__(self, args,
@@ -2366,7 +2426,86 @@ class EnhancedVQVAEv16(EnhancedVQVAEv5):
     def forward(self, motion, text=None):
         return super().forward(motion, text)
 
+class EnhancedVQVAEv17(nn.Module):
+    def __init__(self, args,
+                 d_model=256,
+                 ):
+        super().__init__()
+        # 原始组件
+        self.args = args
+        self.parts_name = ['Root', 'R_Leg', 'L_Leg', 'Backbone', 'R_Arm', 'L_Arm']
+        if args.dataname == 't2m':
+            part_dims=[7,50,50,60,60,60]
+        else:
+            part_dims=[7,62,62,48,48,48]
+        self.part_dims = part_dims
+        self.d_model = d_model
+        # 新增模块
+        self.cmt = EnhancedPartFusionV17(d_model=self.d_model, part_dims=part_dims, num_layers=args.num_layers)
+        self.sem_quantizer = QuantizeEMAReset(args.vqvae_sem_nb, d_model, args)
+        # 对比学习对齐
+        self.text_proj = nn.Linear(args.text_dim, d_model)
+        self.motion_text_proj = nn.Linear(d_model, d_model)
+        self.post_quant_conv = nn.Conv1d(in_channels=d_model * 2, out_channels=d_model, kernel_size=1)
+        # self.
+        self.contrastive_loss = ContrastiveLossWithSTSV2()
+        for idx, name in enumerate(self.parts_name):
+            if args.dataname == 't2m':
+                self.parts_input_dim = {
+                'Root': 7,
+                'R_Leg': 50,
+                'L_Leg': 50,
+                'Backbone': 60,
+                'R_Arm': 60,
+                'L_Arm': 60,
+                }
+            elif args.dataname == 'kit':
+                self.parts_input_dim = {
+                'Root': 7,
+                'R_Leg': 62,
+                'L_Leg': 62,
+                'Backbone': 48,
+                'R_Arm': 48,
+                'L_Arm': 48,
+                }
+            decoder = Decoder_wo_upsample(self.parts_input_dim[name], d_model, down_t=args.down_t, stride_t=args.stride_t, width=args.vqvae_arch_cfg['parts_hidden_dim'][name], depth=args.depth, dilation_growth_rate=args.dilation_growth_rate, activation=args.vq_act, norm=args.vqdec_norm, with_attn=args.with_attn)
+            quantizer = QuantizeEMAReset(args.vqvae_arch_cfg['parts_code_nb'][name], d_model, args)
+            setattr(self, f'dec_{name}', decoder)
+            setattr(self, f'quantizer_{name}', quantizer)
 
+    def forward(self, motion, text=None):
+        # 特征增强
+        global_feature, fused_feat = self.cmt(motion)  # [B, seq, d_model]
+        global_quantized, global_loss, global_perplexity = self.sem_quantizer(rearrange(global_feature, 'b t d -> b d t'))
+        # global_quantized = rearrange(global_quantized, 'b d t -> b t d')
+        if text is not None:
+            text_feature, text_id = text
+            text_feature = text_feature.to(motion[0].device).float()
+            text_feature = self.text_proj(text_feature)
+            motion_feature_global = self.motion_text_proj(global_quantized.mean(dim=2))  # [B, d_model]
+            contrastive_loss = self.contrastive_loss(motion_feature_global, text_feature, text_id)
+        else:
+            contrastive_loss = torch.tensor(0.0).to(motion[0].device)
+        
+        # 原始编码流程
+        x_out_list = []
+        loss_list = [global_loss]
+        perplexity_list = [global_perplexity]
+        disentangle_loss = []
+        # loss_extend = {}
+        for idx, name in enumerate(self.parts_name):
+            quantizer = getattr(self, f'quantizer_{name}')
+            decoder = getattr(self, f'dec_{name}')
+            x_encoder = fused_feat[idx, ...]
+            x_quantized, loss, perplexity = quantizer(rearrange(x_encoder, 'b t d -> b d t'))
+            x_decoder_fused = self.post_quant_conv(torch.cat([x_quantized, global_quantized], dim=1))
+            x_decoder = decoder(x_decoder_fused)
+            x_out_list.append(rearrange(x_decoder, 'b d t -> b t d'))
+            loss_list.append(loss)
+            perplexity_list.append(perplexity)
+            disentangle_loss.append(self.contrastive_loss.compute_disentangle_loss(x_quantized, global_quantized))
+        
+        return x_out_list, loss_list, perplexity_list, [contrastive_loss, disentangle_loss]
 
 class HumanVQVAETransformer(nn.Module):
     def __init__(self,
@@ -2670,6 +2809,17 @@ class HumanVQVAETransformerV16(HumanVQVAETransformer):
         x_out_list, loss_list, perplexity_list = self.enhancedvqvae(x, caption)
 
         return x_out_list, loss_list, perplexity_list, torch.tensor(0.0)
+
+class HumanVQVAETransformerV17(HumanVQVAETransformer):
+    def __init__(self, args, **kwargs):
+        super().__init__(args, **kwargs)
+        self.enhancedvqvae = EnhancedVQVAEv17(args, args.d_model)
+        del self.tokenizer, self.text_encoder, self.vqvae
+
+    def forward(self, x, caption = None):
+        x_out_list, loss_list, perplexity_list, loss_extend = self.enhancedvqvae(x, caption)
+
+        return x_out_list, loss_list, perplexity_list, loss_extend
 
 def test_text():
     import clip

@@ -91,12 +91,11 @@ def evaluation_vqvae(out_dir, val_loader, net, logger, writer, nb_iter, best_fid
             # (parts, GT) ==> (reconstruct_parts)
             #   parts is normalized.
             try:
-                pred_parts, loss_commit, perplexity = net(single_parts, caption[i:i+1])
+                result = net(single_parts, caption[i:i+1])
             except:
-                try:
-                    pred_parts, loss_commit, perplexity, contrastive_loss = net(single_parts, caption[i:i+1])
-                except:
-                    pred_parts, loss_commit, perplexity = net(single_parts)
+                result = net(single_parts)
+            pred_parts = result[0]
+
             # pred_pose, loss_commit, perplexity = net(motion[i:i+1, :m_length[i]])
             # pred_parts = outputs['recon_parts']
             # pred_parts ==> whole_motion

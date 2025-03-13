@@ -255,8 +255,8 @@ class Decoder_wo_upsample(nn.Module):
             out_dim = width
             if self.with_attn:
                 block = nn.Sequential(
-                    Resnet1D(width, depth, dilation_growth_rate, reverse_dilation=True, activation=activation, norm=norm),
                     MotionAttention(width, num_heads=8),
+                    Resnet1D(width, depth, dilation_growth_rate, reverse_dilation=True, activation=activation, norm=norm),
                     nn.Conv1d(width, out_dim, 3, 1, 1)
                 )
             else:

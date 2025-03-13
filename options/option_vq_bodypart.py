@@ -114,6 +114,7 @@ def get_args_parser(args=None):
     parser.add_argument("--dilation-growth-rate", type=int, default=3, help="dilation growth rate")
     parser.add_argument('--vq-act', type=str, default='relu', choices = ['relu', 'silu', 'gelu'], help='dataset directory')
     parser.add_argument('--vq-norm', type=str, default=None, help='dataset directory')
+    parser.add_argument('--vqdec-norm', type=str, default='GN', help='dataset directory')
     parser.add_argument('--num-heads', type=int, default=4)
     parser.add_argument('--num-layers', type=int, default=2)
     parser.add_argument('--bodyconfig', type=bool, default=False)
@@ -121,6 +122,7 @@ def get_args_parser(args=None):
     parser.add_argument('--position', type=int, default=0, help='0:without pos 1:learnable 2:cos sin')
     parser.add_argument('--d_model', type=int, default=256, help='d_model')
     parser.add_argument('--with_attn', type=bool, default=False, help='with_attn')
+    parser.add_argument('--text_dim', type=int, default=512, help='text_dim')
     ## quantizer
     parser.add_argument("--quantizer", type=str, default='ema_reset', choices = ['ema', 'orig', 'ema_reset', 'reset'], help="eps for optimal transport")
     parser.add_argument('--beta', type=float, default=1.0, help='commitment loss in standard VQ')
@@ -146,6 +148,7 @@ def get_args_parser(args=None):
     
     parser.add_argument('--vis-gt', action='store_true', help='whether visualize GT motions')
     parser.add_argument('--nb-vis', default=20, type=int, help='nb of visualizations')
+    parser.add_argument('--vqvae_sem_nb', default=512, type=int, help='nb of visualizations')
     
     if args is None:
         return parser.parse_args()
