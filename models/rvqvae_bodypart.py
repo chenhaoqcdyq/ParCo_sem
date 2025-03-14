@@ -475,7 +475,7 @@ class ContrastiveLossWithSTSV2(nn.Module):
         
         return (loss_motion + loss_text) / 2
     
-    def compute_disentangle_loss(self, quant_vis, quant_sem, disentanglement_ratio=1):
+    def compute_disentangle_loss(self, quant_vis, quant_sem, disentanglement_ratio=0.1):
         quant_vis = rearrange(quant_vis, 'b t c -> (b t) c')
         quant_sem = rearrange(quant_sem, 'b t c -> (b t) c')
 

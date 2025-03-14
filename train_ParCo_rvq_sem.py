@@ -218,7 +218,7 @@ for nb_iter in range(1, args.warm_up_iter):
     loss_commit = losses.gather_loss_list(loss_commit_list)
     loss_vel = losses.gather_loss_list(loss_vel_list)
 
-    loss = loss_motion + args.commit * loss_commit + args.loss_vel * loss_vel + contrastive_loss + disentangle_loss
+    loss = loss_motion + args.commit * loss_commit + args.loss_vel * loss_vel + contrastive_loss * args.contrastive + disentangle_loss
 
 
     optimizer.zero_grad()
@@ -287,7 +287,7 @@ for nb_iter in range(1, args.total_iter + 1):
     loss_commit = losses.gather_loss_list(loss_commit_list)
     loss_vel = losses.gather_loss_list(loss_vel_list)
 
-    loss = loss_motion + args.commit * loss_commit + args.loss_vel * loss_vel + contrastive_loss + disentangle_loss
+    loss = loss_motion + args.commit * loss_commit + args.loss_vel * loss_vel + contrastive_loss * args.contrastive  + disentangle_loss
     
     optimizer.zero_grad()
     loss.backward()
