@@ -2519,7 +2519,7 @@ class EnhancedVQVAEv18(nn.Module):
             part_dims=[7,62,62,48,48,48]
         self.d_model = d_model
         self.cmt = EnhancedPartFusionV6(d_model=self.d_model, part_dims=part_dims, num_layers=args.num_layers)
-        self.decoder = PureMotionDecoder(d_model=self.d_model, output_dim=part_dims, num_layers=args.num_layers)
+        self.decoder = PureMotionDecoder(d_model=self.d_model, output_dim=part_dims, num_layers=args.numdec_layers)
         self.sem_quantizer = QuantizeEMAReset(args.vqvae_sem_nb, d_model, args)
         for idx, name in enumerate(self.parts_name):
             quantizer = QuantizeEMAReset(args.vqvae_arch_cfg['parts_code_nb'][name], d_model, args)
@@ -2549,6 +2549,51 @@ class EnhancedVQVAEv18(nn.Module):
             
         
         return x_out_list, loss_list, perplexity_list, torch.tensor(0.0).to(motion[0].device)
+
+class EnhancedVQVAEv19(EnhancedVQVAEv18):
+    def __init__(self, args,
+                 d_model=256,
+                 ):
+        super().__init__(args=args, d_model=d_model)
+        self.contrastive_loss = ContrastiveLossWithSTSV2()
+        self.text_proj = nn.Linear(args.text_dim, d_model)
+        self.motion_text_proj = nn.Linear(d_model, d_model)
+        self.post_quant_conv = nn.Conv1d(in_channels=d_model * 2, out_channels=d_model, kernel_size=1)
+
+    def forward(self, motion, text=None):
+        # 特征增强
+        global_feature, fused_feat = self.cmt(motion)  # [B, seq, d_model]
+        global_feature = rearrange(global_feature, 'b t d -> b d t')
+        global_quantized, global_loss, global_perplexity = self.sem_quantizer(global_feature)
+        if text is not None:
+            text_feature, text_id = text
+            text_feature = text_feature.to(motion[0].device).float()
+            text_feature = self.text_proj(text_feature)
+            motion_feature_global = self.motion_text_proj(global_quantized.mean(dim=2))  # [B, d_model]
+            contrastive_loss = self.contrastive_loss(motion_feature_global, text_feature, text_id)
+        else:
+            contrastive_loss = torch.tensor(0.0).to(motion[0].device)
+        # 原始编码流程
+        x_out_list = []
+        loss_list = [global_loss]
+        perplexity_list = [global_perplexity]
+        x_quantized_list = [global_quantized]
+        disentangle_loss = []
+        for idx, name in enumerate(self.parts_name):
+            quantizer = getattr(self, f'quantizer_{name}')
+            # decoder = getattr(self, f'dec_{name}')
+            x_encoder = fused_feat[idx, ...]
+            x_quantized, loss, perplexity = quantizer(rearrange(x_encoder, 'b t d -> b d t'))
+            x_quantized_list.append(x_quantized)
+            disentangle_loss.append(self.contrastive_loss.compute_disentangle_loss(x_quantized, global_quantized))
+            # x_out_list.append(rearrange(x_decoder, 'b d t -> b t d'))
+            loss_list.append(loss)
+            perplexity_list.append(perplexity)
+        x_out_list = self.decoder(x_quantized_list)
+            # x_decoder = decoder(x_quantized)
+            
+        
+        return x_out_list, loss_list, perplexity_list, [contrastive_loss, disentangle_loss]
 
 class HumanVQVAETransformer(nn.Module):
     def __init__(self,
@@ -2868,6 +2913,17 @@ class HumanVQVAETransformerV18(HumanVQVAETransformer):
     def __init__(self, args, **kwargs):
         super().__init__(args, **kwargs)
         self.enhancedvqvae = EnhancedVQVAEv18(args, args.d_model)
+        del self.tokenizer, self.text_encoder, self.vqvae
+
+    def forward(self, x, caption = None):
+        x_out_list, loss_list, perplexity_list, loss_extend = self.enhancedvqvae(x, caption)
+
+        return x_out_list, loss_list, perplexity_list, loss_extend
+
+class HumanVQVAETransformerV19(HumanVQVAETransformer):
+    def __init__(self, args, **kwargs):
+        super().__init__(args, **kwargs)
+        self.enhancedvqvae = EnhancedVQVAEv19(args, args.d_model)
         del self.tokenizer, self.text_encoder, self.vqvae
 
     def forward(self, x, caption = None):

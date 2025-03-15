@@ -194,7 +194,7 @@ for nb_iter in range(1, args.warm_up_iter):
     for i in range(len(gt_parts)):
         gt_parts[i] = gt_parts[i].cuda().float()
 
-    if args.vision == 17:
+    if args.vision >= 17:
         cond = [text_feature, text_id]
     else:
         cond = text
@@ -263,7 +263,7 @@ for nb_iter in range(1, args.total_iter + 1):
         gt_parts, text, text_id = next(train_loader_iter)
     for i in range(len(gt_parts)):
         gt_parts[i] = gt_parts[i].cuda().float()
-    if args.vision == 17:
+    if args.vision >= 17:
         cond = [text_feature, text_id]
     else:
         cond = text

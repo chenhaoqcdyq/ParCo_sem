@@ -118,6 +118,7 @@ def get_args_parser(args=None):
     parser.add_argument('--vqdec-norm', type=str, default='GN', help='dataset directory')
     parser.add_argument('--num-heads', type=int, default=4)
     parser.add_argument('--num-layers', type=int, default=2)
+    parser.add_argument('--numdec-layers', type=int, default=2)
     parser.add_argument('--bodyconfig', type=bool, default=False)
     parser.add_argument('--causal', type=bool, default=False, help='causal squence')
     parser.add_argument('--position', type=int, default=0, help='0:without pos 1:learnable 2:cos sin')
