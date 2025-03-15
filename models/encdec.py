@@ -395,3 +395,106 @@ class MotionDecoder(nn.Module):
         # 最终输出
         x = self.final_norm(x)
         return self.output_proj(x)
+    
+class PureMotionDecoder(nn.Module):
+    def __init__(self, output_dim, d_model=256, num_layers=2, num_parts=6):
+        super().__init__()
+        # 全局时空编码器
+        self.global_encoder = nn.Sequential(
+            nn.TransformerEncoder(
+                nn.TransformerEncoderLayer(d_model=d_model, nhead=4, batch_first=True),
+                num_layers=num_layers
+            ),
+            TemporalConvBlock(d_model)  # 新增时序卷积模块
+        )
+        
+        # 分部位解码器
+        self.part_decoders = nn.ModuleList([
+            PartDecoderV2(d_model) for _ in range(num_parts)
+        ])
+        
+        self.dim_adapter = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(d_model, d_model//2),
+                nn.ReLU(),
+                nn.Linear(d_model//2, output_dim[i])
+            ) for i in range(num_parts)
+        ])
+        
+        # 特征融合门控
+        self.fusion_gate = nn.Parameter(torch.ones(num_parts))
+
+    def forward(self, motion_features):
+        """
+        Input: motion_features [bs,7,seq_len,dim] 
+               (包含1个全局特征+6个部位特征)
+        Output: [bs,6,seq_len,dim]
+        """
+        # 全局特征增强
+        global_feat = motion_features[0].permute(0,2,1)  # [bs,dim,seq_len]
+        # global_feat = motion_features[:,0]  # [bs,seq_len,dim]
+        
+        global_encoded = self.global_encoder(global_feat)  # [bs,seq_len,dim]
+        
+        # 门控特征融合
+        reconstructions = []
+        for i in range(6):
+            part_feat = motion_features[i+1].permute(0,2,1)
+            # 动态门控融合 (比交叉注意力更高效)
+            gate = torch.sigmoid(self.fusion_gate[i])
+            fused = gate * global_encoded + (1-gate) * part_feat
+            # 部位解码
+            decoded = self.part_decoders[i](fused)
+            reconstructions.append(decoded)
+        result = [adapter(reconstructions[i]) for i, adapter in enumerate(self.dim_adapter)]
+        return result
+
+class PartDecoderV2(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.time_blocks = nn.Sequential(
+            *[TemporalResBlock(dim) for _ in range(3)]
+        )
+        
+    def forward(self, x):
+        return self.time_blocks(x)
+
+class TemporalResBlock(nn.Module):
+    """混合时序特征提取块"""
+    def __init__(self, dim):
+        super().__init__()
+        self.attn = nn.MultiheadAttention(
+            embed_dim=dim, 
+            num_heads=2,
+            batch_first=True
+        )
+        self.conv = nn.Conv1d(
+            dim, dim, kernel_size=3, 
+            padding=1, groups=4  # 分组卷积提升效率
+        )
+        
+    def forward(self, x):
+        # 分支1：局部注意力
+        attn_out, _ = self.attn(x, x, x)
+        # 分支2：深度卷积
+        conv_out = self.conv(x.permute(0,2,1)).permute(0,2,1)
+        # 残差融合
+        return x + attn_out + conv_out
+
+class TemporalConvBlock(nn.Module):
+    """多尺度时序特征提取"""
+    def __init__(self, dim):
+        super().__init__()
+        self.convs = nn.ModuleList([
+            nn.Conv1d(dim, dim//4, kernel_size, padding=kernel_size//2)
+            for kernel_size in [3, 5, 7, 9]
+        ])
+        self.fuse = nn.Linear(dim, dim)
+        
+    def forward(self, x):
+        # x: [bs, seq_len, dim]
+        x_t = x.permute(0,2,1)  # [bs, dim, seq_len]
+        features = [conv(x_t) for conv in self.convs]
+        # 多尺度特征拼接
+        fused = torch.cat(features, dim=1).permute(0,2,1)  # [bs, seq_len, dim]
+        return self.fuse(fused)

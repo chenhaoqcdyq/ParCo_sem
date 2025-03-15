@@ -83,19 +83,19 @@ class VQMotionDatasetBodyPart(data.Dataset):
                 else:
                     text_tokens = torch.load(text_tokens_path, map_location=torch.device('cpu'))
                 text_feature_path = pjoin(self.text_feature_dir, name + '.pth')
-                text_feature_all_path = pjoin(self.text_feature_dir, name + '_all.pth')
+                # text_feature_all_path = pjoin(self.text_feature_dir, name + '_all.pth')
                 if not os.path.exists(text_feature_path):
                     with torch.no_grad():
                         # outputs = self.text_model(**inputs).last_hidden_state.mean(dim=1)
                         text_features = clip_model.encode_text(text_tokens)
-                        text_allseq = clip_model.encode_text_allseq(text_tokens)
+                        # text_allseq = clip_model.encode_text_allseq(text_tokens)
                     # torch.save(text_tokens, text_tokens_path)
                     torch.save(text_features, text_feature_path)
-                    torch.save(text_allseq, text_feature_all_path)
+                    # torch.save(text_allseq, text_feature_all_path)
                     
                 else:
                     text_features = torch.load(text_feature_path, map_location=torch.device('cpu'))
-                    text_allseq = torch.load(text_feature_all_path, map_location=torch.device('cpu'))
+                    # text_allseq = torch.load(text_feature_all_path, map_location=torch.device('cpu'))
                     # text_tokens = torch.load(text_tokens_path)
                     # if text_tokens.shape[0] != len(text_data):
                     #     inputs = self.tokenizer(text_data, return_tensors='pt', padding=True, truncation=True, max_length=77)
@@ -109,7 +109,7 @@ class VQMotionDatasetBodyPart(data.Dataset):
                 'text': text_data,           # 新增文本信息
                 'text_token':text_tokens.cpu(),
                 'text_feature': text_features.cpu(),
-                'text_feature_all': text_allseq.cpu(),
+                'text_feature_all': text_features.cpu(),
                 'text_id': name
                 })
 

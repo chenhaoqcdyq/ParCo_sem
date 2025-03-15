@@ -3,7 +3,7 @@ from einops import rearrange
 from sentence_transformers import SentenceTransformer
 import torch
 import torch.nn as nn
-from models.encdec import Encoder, Decoder, EnhancedDecoder, Decoder_wo_upsample
+from models.encdec import Encoder, Decoder, EnhancedDecoder, Decoder_wo_upsample, PureMotionDecoder
 import torch.nn.functional as F
 from models.quantize_cnn import QuantizeEMAReset, Quantizer, QuantizeEMA, QuantizeReset
 from models.residual_vq import ResidualVQ
@@ -465,13 +465,13 @@ class ContrastiveLossWithSTSV2(nn.Module):
         
         # 避免除零
         valid_pos = (pos_mask.sum(dim=1) > 0)
-        loss_motion = -torch.log(numerator[valid_pos]/denominator[valid_pos]).sum()
+        loss_motion = -torch.log(numerator[valid_pos]/denominator[valid_pos]).mean()
         
         # 对称文本到动作损失
         exp_logits_text = torch.exp(logits_per_text)
         numerator_text = torch.sum(exp_logits_text * pos_mask, dim=1)
         denominator_text = torch.sum(exp_logits_text, dim=1)
-        loss_text = -torch.log(numerator_text[valid_pos]/denominator_text[valid_pos]).sum()
+        loss_text = -torch.log(numerator_text[valid_pos]/denominator_text[valid_pos]).mean()
         
         return (loss_motion + loss_text) / 2
     
@@ -948,7 +948,7 @@ class EnhancedPartFusionV6(nn.Module):
         # 增强的位置编码体系
         self.part_position = nn.Embedding(6, d_model)  # 部件类型编码
         # 时间下采样模块
-        self.temporal_downsample = TemporalDownsamplerV2(d_model)
+        # self.temporal_downsample = TemporalDownsamplerV2(d_model)
         # 层级式特征投影
         self.part_projs = nn.ModuleList([
             DynamicProjection(dim, d_model) for dim in part_dims
@@ -2447,10 +2447,7 @@ class EnhancedVQVAEv17(nn.Module):
         self.text_proj = nn.Linear(args.text_dim, d_model)
         self.motion_text_proj = nn.Linear(d_model, d_model)
         self.post_quant_conv = nn.Conv1d(in_channels=d_model * 2, out_channels=d_model, kernel_size=1)
-        # self.
-        self.contrastive_loss = ContrastiveLossWithSTSV2()
-        for idx, name in enumerate(self.parts_name):
-            if args.dataname == 't2m':
+        if args.dataname == 't2m':
                 self.parts_input_dim = {
                 'Root': 7,
                 'R_Leg': 50,
@@ -2459,15 +2456,17 @@ class EnhancedVQVAEv17(nn.Module):
                 'R_Arm': 60,
                 'L_Arm': 60,
                 }
-            elif args.dataname == 'kit':
-                self.parts_input_dim = {
-                'Root': 7,
-                'R_Leg': 62,
-                'L_Leg': 62,
-                'Backbone': 48,
-                'R_Arm': 48,
-                'L_Arm': 48,
-                }
+        elif args.dataname == 'kit':
+            self.parts_input_dim = {
+            'Root': 7,
+            'R_Leg': 62,
+            'L_Leg': 62,
+            'Backbone': 48,
+            'R_Arm': 48,
+            'L_Arm': 48,
+            }
+        self.contrastive_loss = ContrastiveLossWithSTSV2()
+        for idx, name in enumerate(self.parts_name):
             decoder = Decoder_wo_upsample(self.parts_input_dim[name], d_model, down_t=args.down_t, stride_t=args.stride_t, width=args.vqvae_arch_cfg['parts_hidden_dim'][name], depth=args.depth, dilation_growth_rate=args.dilation_growth_rate, activation=args.vq_act, norm=args.vqdec_norm, with_attn=args.with_attn)
             quantizer = QuantizeEMAReset(args.vqvae_arch_cfg['parts_code_nb'][name], d_model, args)
             setattr(self, f'dec_{name}', decoder)
@@ -2506,6 +2505,50 @@ class EnhancedVQVAEv17(nn.Module):
             disentangle_loss.append(self.contrastive_loss.compute_disentangle_loss(x_quantized, global_quantized))
         
         return x_out_list, loss_list, perplexity_list, [contrastive_loss, disentangle_loss]
+
+class EnhancedVQVAEv18(nn.Module):
+    def __init__(self, args,
+                 d_model=256,
+                 ):
+        super().__init__()
+        self.args = args
+        self.parts_name = ['Root', 'R_Leg', 'L_Leg', 'Backbone', 'R_Arm', 'L_Arm']
+        if args.dataname == 't2m':
+            part_dims=[7,50,50,60,60,60]
+        else:
+            part_dims=[7,62,62,48,48,48]
+        self.d_model = d_model
+        self.cmt = EnhancedPartFusionV6(d_model=self.d_model, part_dims=part_dims, num_layers=args.num_layers)
+        self.decoder = PureMotionDecoder(d_model=self.d_model, output_dim=part_dims, num_layers=args.num_layers)
+        self.sem_quantizer = QuantizeEMAReset(args.vqvae_sem_nb, d_model, args)
+        for idx, name in enumerate(self.parts_name):
+            quantizer = QuantizeEMAReset(args.vqvae_arch_cfg['parts_code_nb'][name], d_model, args)
+            setattr(self, f'quantizer_{name}', quantizer)
+
+    def forward(self, motion, text=None):
+        # 特征增强
+        global_feature, fused_feat = self.cmt(motion)  # [B, seq, d_model]
+        global_feature = rearrange(global_feature, 'b t d -> b d t')
+        global_quantized, global_loss, global_perplexity = self.sem_quantizer(global_feature)
+        # 原始编码流程
+        x_out_list = []
+        loss_list = [global_loss]
+        perplexity_list = [global_perplexity]
+        x_quantized_list = [global_quantized]
+        for idx, name in enumerate(self.parts_name):
+            quantizer = getattr(self, f'quantizer_{name}')
+            # decoder = getattr(self, f'dec_{name}')
+            x_encoder = fused_feat[idx, ...]
+            x_quantized, loss, perplexity = quantizer(rearrange(x_encoder, 'b t d -> b d t'))
+            x_quantized_list.append(x_quantized)
+            # x_out_list.append(rearrange(x_decoder, 'b d t -> b t d'))
+            loss_list.append(loss)
+            perplexity_list.append(perplexity)
+        x_out_list = self.decoder(x_quantized_list)
+            # x_decoder = decoder(x_quantized)
+            
+        
+        return x_out_list, loss_list, perplexity_list, torch.tensor(0.0).to(motion[0].device)
 
 class HumanVQVAETransformer(nn.Module):
     def __init__(self,
@@ -2814,6 +2857,17 @@ class HumanVQVAETransformerV17(HumanVQVAETransformer):
     def __init__(self, args, **kwargs):
         super().__init__(args, **kwargs)
         self.enhancedvqvae = EnhancedVQVAEv17(args, args.d_model)
+        del self.tokenizer, self.text_encoder, self.vqvae
+
+    def forward(self, x, caption = None):
+        x_out_list, loss_list, perplexity_list, loss_extend = self.enhancedvqvae(x, caption)
+
+        return x_out_list, loss_list, perplexity_list, loss_extend
+
+class HumanVQVAETransformerV18(HumanVQVAETransformer):
+    def __init__(self, args, **kwargs):
+        super().__init__(args, **kwargs)
+        self.enhancedvqvae = EnhancedVQVAEv18(args, args.d_model)
         del self.tokenizer, self.text_encoder, self.vqvae
 
     def forward(self, x, caption = None):

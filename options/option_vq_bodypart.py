@@ -101,7 +101,7 @@ def get_args_parser(args=None):
     parser.add_argument("--commit", type=float, default=0.02, help="hyper-parameter for the commitment loss")
     parser.add_argument('--loss-vel', type=float, default=0.1, help='hyper-parameter for the velocity loss')
     parser.add_argument('--recons-loss', type=str, default='l2', help='reconstruction loss')
-    parser.add_argument("--contrastive", type=float, default=0.02, help="hyper-parameter for the commitment loss")
+    parser.add_argument("--contrastive", type=float, default=0.2, help="hyper-parameter for the commitment loss")
 
 
     parser.add_argument("--vqvae-cfg", type=str, help="Base config for vqvae")
