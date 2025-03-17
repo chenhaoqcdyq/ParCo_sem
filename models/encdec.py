@@ -287,27 +287,27 @@ class Upsample(nn.Module):
         return x
 
 
-class TemporalResBlock(nn.Module):
-    """时间维度残差块（1D卷积版本）"""
-    def __init__(self, dim, expansion=4, dropout=0.1):
-        super().__init__()
-        hidden_dim = dim * expansion
-        self.norm1 = nn.LayerNorm(dim)
-        self.conv1 = nn.Conv1d(dim, hidden_dim, kernel_size=3, padding=1)
-        self.norm2 = nn.LayerNorm(hidden_dim)
-        self.conv2 = nn.Conv1d(hidden_dim, dim, kernel_size=3, padding=1)
-        self.dropout = nn.Dropout(dropout)
+# class TemporalResBlock(nn.Module):
+#     """时间维度残差块（1D卷积版本）"""
+#     def __init__(self, dim, expansion=4, dropout=0.1):
+#         super().__init__()
+#         hidden_dim = dim * expansion
+#         self.norm1 = nn.LayerNorm(dim)
+#         self.conv1 = nn.Conv1d(dim, hidden_dim, kernel_size=3, padding=1)
+#         self.norm2 = nn.LayerNorm(hidden_dim)
+#         self.conv2 = nn.Conv1d(hidden_dim, dim, kernel_size=3, padding=1)
+#         self.dropout = nn.Dropout(dropout)
         
-    def forward(self, x):
-        # x: (B, L, D)
-        residual = x
-        x = self.norm1(x)
-        x = x.permute(0, 2, 1)  # (B, D, L)
-        x = F.gelu(self.conv1(x))
-        x = self.norm2(x.permute(0, 2, 1)).permute(0, 2, 1)
-        x = self.dropout(x)
-        x = self.conv2(x).permute(0, 2, 1)  # (B, L, D)
-        return residual + x
+#     def forward(self, x):
+#         # x: (B, L, D)
+#         residual = x
+#         x = self.norm1(x)
+#         x = x.permute(0, 2, 1)  # (B, D, L)
+#         x = F.gelu(self.conv1(x))
+#         x = self.norm2(x.permute(0, 2, 1)).permute(0, 2, 1)
+#         x = self.dropout(x)
+#         x = self.conv2(x).permute(0, 2, 1)  # (B, L, D)
+#         return residual + x
 
 class MotionAttention(nn.Module):
     """运动序列注意力机制"""
@@ -397,20 +397,22 @@ class MotionDecoder(nn.Module):
         return self.output_proj(x)
     
 class PureMotionDecoder(nn.Module):
-    def __init__(self, output_dim, d_model=256, num_layers=2, num_parts=6):
+    def __init__(self, output_dim, d_model=256, num_layers=2, num_parts=6, with_attn=False, with_global = True):
         super().__init__()
-        # 全局时空编码器
-        self.global_encoder = nn.Sequential(
-            nn.TransformerEncoder(
-                nn.TransformerEncoderLayer(d_model=d_model, nhead=4, batch_first=True),
-                num_layers=num_layers
-            ),
-            TemporalConvBlock(d_model)  # 新增时序卷积模块
-        )
+        self.with_global = with_global
+        if with_global:
+            # 全局时空编码器
+            self.global_encoder = nn.Sequential(
+                nn.TransformerEncoder(
+                    nn.TransformerEncoderLayer(d_model=d_model, nhead=4, batch_first=True),
+                    num_layers=num_layers
+                ),
+                TemporalConvBlock(d_model)  # 新增时序卷积模块
+            )
         
         # 分部位解码器
         self.part_decoders = nn.ModuleList([
-            PartDecoderV2(d_model) for _ in range(num_parts)
+            PartDecoderV2(d_model, num_layers) for _ in range(num_parts)
         ])
         
         self.dim_adapter = nn.ModuleList([
@@ -420,10 +422,15 @@ class PureMotionDecoder(nn.Module):
                 nn.Linear(d_model//2, output_dim[i])
             ) for i in range(num_parts)
         ])
-        
+        if with_attn and with_global:
+            self.cross_attns = nn.ModuleList([
+            nn.MultiheadAttention(embed_dim=d_model, num_heads=4, batch_first=True)
+            for _ in range(num_parts)
+        ])
+        else:
         # 特征融合门控
-        self.fusion_gate = nn.Parameter(torch.ones(num_parts))
-
+            self.fusion_gate = nn.Parameter(torch.ones(num_parts))
+        self.with_attn = with_attn
     def forward(self, motion_features):
         """
         Input: motion_features [bs,7,seq_len,dim] 
@@ -433,16 +440,29 @@ class PureMotionDecoder(nn.Module):
         # 全局特征增强
         global_feat = motion_features[0].permute(0,2,1)  # [bs,dim,seq_len]
         # global_feat = motion_features[:,0]  # [bs,seq_len,dim]
-        
-        global_encoded = self.global_encoder(global_feat)  # [bs,seq_len,dim]
+        if self.with_global:
+            global_encoded = self.global_encoder(global_feat)  # [bs,seq_len,dim]
         
         # 门控特征融合
         reconstructions = []
         for i in range(6):
             part_feat = motion_features[i+1].permute(0,2,1)
-            # 动态门控融合 (比交叉注意力更高效)
-            gate = torch.sigmoid(self.fusion_gate[i])
-            fused = gate * global_encoded + (1-gate) * part_feat
+            if self.with_global:
+                if self.with_attn:
+                    # 交叉注意力融合
+                    attn_output, _ = self.cross_attns[i](
+                        query=part_feat,
+                        key=global_encoded,
+                        value=global_encoded
+                    )
+                    # 残差连接
+                    fused = part_feat + attn_output
+                else:
+                    # 动态门控融合
+                    gate = torch.sigmoid(self.fusion_gate[i])
+                    fused = gate * global_encoded + (1-gate) * part_feat
+            else:
+                fused = part_feat
             # 部位解码
             decoded = self.part_decoders[i](fused)
             reconstructions.append(decoded)
@@ -450,22 +470,21 @@ class PureMotionDecoder(nn.Module):
         return result
 
 class PartDecoderV2(nn.Module):
-    def __init__(self, dim):
+    def __init__(self, dim, num_layers=3):
         super().__init__()
         self.time_blocks = nn.Sequential(
-            *[TemporalResBlock(dim) for _ in range(3)]
+            *[TemporalResBlock(dim) for _ in range(num_layers)]
         )
         
     def forward(self, x):
         return self.time_blocks(x)
 
 class TemporalResBlock(nn.Module):
-    """混合时序特征提取块"""
     def __init__(self, dim):
         super().__init__()
         self.attn = nn.MultiheadAttention(
             embed_dim=dim, 
-            num_heads=2,
+            num_heads=4,
             batch_first=True
         )
         self.conv = nn.Conv1d(

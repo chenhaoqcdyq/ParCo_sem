@@ -124,6 +124,7 @@ def get_args_parser(args=None):
     parser.add_argument('--position', type=int, default=0, help='0:without pos 1:learnable 2:cos sin')
     parser.add_argument('--d_model', type=int, default=256, help='d_model')
     parser.add_argument('--with_attn', type=bool, default=False, help='with_attn')
+    parser.add_argument('--with_global', type=int, default=1, help='with_global')
     parser.add_argument('--text_dim', type=int, default=512, help='text_dim')
     ## quantizer
     parser.add_argument("--quantizer", type=str, default='ema_reset', choices = ['ema', 'orig', 'ema_reset', 'reset'], help="eps for optimal transport")

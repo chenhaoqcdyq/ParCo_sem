@@ -2519,7 +2519,7 @@ class EnhancedVQVAEv18(nn.Module):
             part_dims=[7,62,62,48,48,48]
         self.d_model = d_model
         self.cmt = EnhancedPartFusionV6(d_model=self.d_model, part_dims=part_dims, num_layers=args.num_layers)
-        self.decoder = PureMotionDecoder(d_model=self.d_model, output_dim=part_dims, num_layers=args.numdec_layers)
+        self.decoder = PureMotionDecoder(d_model=self.d_model, output_dim=part_dims, num_layers=args.numdec_layers, with_attn=args.with_attn, with_global=args.with_global)
         self.sem_quantizer = QuantizeEMAReset(args.vqvae_sem_nb, d_model, args)
         for idx, name in enumerate(self.parts_name):
             quantizer = QuantizeEMAReset(args.vqvae_arch_cfg['parts_code_nb'][name], d_model, args)
