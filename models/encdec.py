@@ -287,28 +287,6 @@ class Upsample(nn.Module):
         return x
 
 
-# class TemporalResBlock(nn.Module):
-#     """时间维度残差块（1D卷积版本）"""
-#     def __init__(self, dim, expansion=4, dropout=0.1):
-#         super().__init__()
-#         hidden_dim = dim * expansion
-#         self.norm1 = nn.LayerNorm(dim)
-#         self.conv1 = nn.Conv1d(dim, hidden_dim, kernel_size=3, padding=1)
-#         self.norm2 = nn.LayerNorm(hidden_dim)
-#         self.conv2 = nn.Conv1d(hidden_dim, dim, kernel_size=3, padding=1)
-#         self.dropout = nn.Dropout(dropout)
-        
-#     def forward(self, x):
-#         # x: (B, L, D)
-#         residual = x
-#         x = self.norm1(x)
-#         x = x.permute(0, 2, 1)  # (B, D, L)
-#         x = F.gelu(self.conv1(x))
-#         x = self.norm2(x.permute(0, 2, 1)).permute(0, 2, 1)
-#         x = self.dropout(x)
-#         x = self.conv2(x).permute(0, 2, 1)  # (B, L, D)
-#         return residual + x
-
 class MotionAttention(nn.Module):
     """运动序列注意力机制"""
     def __init__(self, dim, num_heads=4, residual=True):
