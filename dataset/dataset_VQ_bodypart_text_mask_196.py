@@ -12,6 +12,7 @@ from functools import partial
 from transformers import AutoTokenizer
 from typing import List, Dict
 from transformers import BertTokenizer, BertModel
+from transformers import CLIPModel, CLIPTokenizer
 
 class VQMotionDatasetBodyPart(data.Dataset):
     def __init__(self, dataset_name, window_size=64, unit_length=4, print_warning=False, strategy='basic'):
@@ -41,9 +42,10 @@ class VQMotionDatasetBodyPart(data.Dataset):
             self.max_motion_length = 196
             self.meta_dir = 'checkpoints/kit/Decomp_SP001_SM001_H512/meta'
         self.text_mask_dir =  pjoin(self.data_root, 'texts_mask_deepseek')
+        self.bert_feature_dir = pjoin(self.data_root, 'texts_bert_feature')
         os.makedirs(self.text_token_dir, exist_ok=True)
         os.makedirs(self.text_feature_dir, exist_ok=True)
-        from transformers import CLIPModel, CLIPTokenizer
+        os.makedirs(self.bert_feature_dir, exist_ok=True)
         clip_model, preprocess = clip.load('ViT-B/32')
         joints_num = self.joints_num
         
@@ -117,21 +119,24 @@ class VQMotionDatasetBodyPart(data.Dataset):
         self.tokenizer_name = "bert-base-uncased"
         # self.tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_name)
         self.bert_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-        # self.bert_model = BertModel.from_pretrained('bert-base-uncased')
-        # self.bert_model.cuda()
-        # self.bert_model.eval()  # 冻结BERT参数
+        self.bert_model = BertModel.from_pretrained('bert-base-uncased')
+        self.bert_model.cuda()
+        self.bert_model.eval()  # 冻结BERT参数
         mask_list = [os.path.join(self.text_mask_dir, name + '.json') for name in name_list]
         self.raw_samples = self._load_raw_data(mask_list)
         self.masker = DynamicMaskGenerator()
         self.strategy = strategy
-        self.static_labels = []
+        self.static_labels, self.bert_feature = [], []
         # 生成动态标签
         for i in tqdm(range(len(self.raw_samples))):
             tmp = []
             for j in range(len(self.raw_samples[i])):
                 tmp.append(self._get_static_labels(self.raw_samples[i][j]))
+            # text_feature_tmp.append()
             self.static_labels.append(tmp)
-
+            self.bert_feature.append(self._get_text_features(self.raw_samples[i], self.bert_feature_dir))
+        del self.bert_model
+    
     def _load_raw_data(self, file_paths: List[str]) -> List[Dict]:
         """加载原始未掩码数据"""
         samples = []
@@ -140,10 +145,35 @@ class VQMotionDatasetBodyPart(data.Dataset):
             with open(path, 'r') as f:
                 data = json.load(f)
                 for i in range(len(data['samples'])):
-                    data['samples'][i]['name'] = path 
+                    data['samples'][i]['name'] = os.path.basename(path).split('.')[0] 
                 samples.append(data['samples'])
         return samples
 
+    def _get_text_features(self, sample: Dict, save_dir: str) -> torch.Tensor:
+        """获取文本特征"""
+        name = sample[0]['name']
+        if not os.path.exists(save_dir):
+            os.makedirs(save_dir, exist_ok=True)
+        if not os.path.exists(pjoin(save_dir, name + '.pth')):
+            text = []
+            for i in range(len(sample)):
+                text.append(sample[i]['original_text'])
+            encoded = self.bert_tokenizer(
+                text,
+                padding='max_length',
+                truncation=True,
+                max_length=128,
+                return_tensors='pt'
+            )
+            for k,v in encoded.items():
+                encoded[k] = v.cuda()
+            with torch.no_grad():
+                output = self.bert_model(**encoded)
+            torch.save(output.pooler_output.cpu(), pjoin(save_dir, name + '.pth'))
+            result = output.pooler_output
+        else:
+            result = torch.load(pjoin(save_dir, name + '.pth'), map_location=torch.device('cpu'))
+        return result
 
     def _get_static_labels(self, sample: Dict) -> List[Dict]:
         """从原始标注生成静态标签"""
@@ -212,7 +242,7 @@ class VQMotionDatasetBodyPart(data.Dataset):
         return prob
 
     def whole2parts(self, motion, mode='t2m'):
-        Root, R_Leg, L_Leg, Backbone, R_Arm, L_Arm = whole2parts(motion, mode, window_size=self.window_size)
+        Root, R_Leg, L_Leg, Backbone, R_Arm, L_Arm = whole2parts(motion, mode)
         return [Root, R_Leg, L_Leg, Backbone, R_Arm, L_Arm]
 
     def get_each_part_vel(self, parts, mode='t2m'):
@@ -235,7 +265,6 @@ class VQMotionDatasetBodyPart(data.Dataset):
         text_features = data['text_feature'].cpu()
         text_feature_alls = data['text_feature_all'].cpu()
         text_id = data['text_id']
-        # text_mask = data['text_mask']
         
         text_random_id = random.randint(0, len(text_list) - 1)
         text = text_list[text_random_id]
@@ -250,10 +279,20 @@ class VQMotionDatasetBodyPart(data.Dataset):
 
         # Preprocess. We should set the slice of motion at getitem stage, not in the initialization.
         # If in the initialization, the augmentation of motion slice will be fixed, which will damage the diversity.
-        idx = random.randint(0, len(motion) - self.window_size)
-        motion = motion[idx:idx+self.window_size]
         "Z Normalization"
         motion = (motion - self.mean) / self.std
+        orig_len = len(motion)
+        if orig_len < self.max_motion_length:
+            # 不足时padding零（根据motion维度调整pad_width）
+            pad_width = [(0, self.max_motion_length - orig_len)] + [(0,0)] * (motion.ndim-1)
+            motion = np.pad(motion, pad_width, mode='constant')
+            # 生成mask（1表示真实数据，0表示padding）
+            motion_mask = np.concatenate([np.ones(orig_len), np.zeros(self.max_motion_length - orig_len)])
+        else:
+            # 过长时直接截断
+            motion = motion[:self.max_motion_length]
+            motion_mask = np.ones(self.max_motion_length)
+        
 
         parts = self.whole2parts(motion, mode=self.dataset_name)
 
@@ -266,6 +305,7 @@ class VQMotionDatasetBodyPart(data.Dataset):
         raw_sample = raw_sample_list[idx_sample]
         text = raw_sample['original_text']
         static_labels = self.static_labels[item][idx_sample]
+        text_bert_feature = self.bert_feature[item][idx_sample]
         # 选择掩码策略
         if self.strategy == "progressive":
             stage = random.choice(self.masker.progressive_stages)
@@ -283,21 +323,15 @@ class VQMotionDatasetBodyPart(data.Dataset):
             max_length=128,
             return_tensors='pt'
         )
-        # with torch.no_grad():
-        #     bert_outputs = self.bert_model(
-        #         input_ids=encoded['input_ids'],
-        #         attention_mask=encoded['attention_mask']
-        #     )
         # 构建动态标签
         labels = self._build_labels(encoded, masked_data['labels'])
         text_mask = {
             'input_ids': encoded['input_ids'].squeeze(),
             'attention_mask': encoded['attention_mask'].squeeze(),
-            # 'bert_features': bert_outputs['last_hidden_state'].squeeze(),
-            # 'bert_features_pool': bert_outputs['pooler_output'].squeeze(),
-            'labels': labels
+            'labels': labels,
+            'feature': text_bert_feature
         }
-        return [Root, R_Leg, L_Leg, Backbone, R_Arm, L_Arm], text, text_token, text_feature, text_feature_all, text_id, text_mask
+        return [Root, R_Leg, L_Leg, Backbone, R_Arm, L_Arm], text, text_token, text_feature, text_feature_all, text_id, text_mask, motion_mask
 
 class DynamicMaskGenerator:
     def __init__(self, 

@@ -1939,7 +1939,7 @@ class EnhancedPartFusionV20(nn.Module):
         self.spatial_transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         self.time_transformer = CausalTransformerEncoder(time_encoder_layer, num_layers=num_layers)
 
-    def forward(self, parts_feature):
+    def forward(self, parts_feature, motion_mask=None):
         # 部件特征预处理
         B, T = parts_feature[0].shape[0], parts_feature[0].shape[1]
         
@@ -1963,7 +1963,12 @@ class EnhancedPartFusionV20(nn.Module):
         spatial_feat = self.spatial_transformer(spatial_feat)  # [B*T, 7, d]
         
         time_feat = rearrange(spatial_feat, '(b t) p d-> (b p) t d', b=B, p=6)
-        time_feat = self.time_transformer(time_feat)  # [T, B*7, d]
+        if motion_mask is not None:
+            motion_mask = motion_mask.to(time_feat.device).bool()
+            time_key_padding_mask = motion_mask.repeat_interleave(6, dim=0)
+            time_feat = self.time_transformer(time_feat, src_key_padding_mask=~time_key_padding_mask)  # [T, B*7, d]
+        else:
+            time_feat = self.time_transformer(time_feat)
         feature = rearrange(time_feat, '(b p) t d -> b t p d', b=B, p=6)
         # 残差连接增强
         return rearrange(feature, 'b t p d -> p b t d', b=B)
@@ -1992,7 +1997,6 @@ class EnhancedVQVAE(nn.Module):
         # 默认text参数
         self.null_text_embed = nn.Parameter(torch.randn(1, 1, d_model))
         # 对比学习参数
-        # self.contrastive_temp = contrastive_temp
         self.logit_scale = nn.Parameter(torch.ones([]) * torch.tensor(1.0/contrastive_temp))
         self.motion_proj = nn.ModuleDict(
             {name: nn.Linear(self.d_model, parts_output_dim[name]) for name in self.original_vqvae.parts_name}
@@ -2700,6 +2704,56 @@ class EnhancedVQVAEv20(nn.Module):
             contrastive_loss = torch.tensor(0.0).to(motion[0].device)
         return x_out_list, loss_list, perplexity_list, contrastive_loss
 
+class EnhancedVQVAEv21(nn.Module):
+    def __init__(self, args,
+                 d_model=256,
+                 ):
+        super().__init__()
+        self.args = args
+        self.parts_name = ['Root', 'R_Leg', 'L_Leg', 'Backbone', 'R_Arm', 'L_Arm']
+        if args.dataname == 't2m':
+            part_dims=[7,50,50,60,60,60]
+        else:
+            part_dims=[7,62,62,48,48,48]
+        self.d_model = d_model
+        self.cmt = EnhancedPartFusionV20(d_model=self.d_model, part_dims=part_dims, num_layers=args.num_layers)
+        if args.lgvq==1:
+            self.lgvq = LGVQv2(args, d_model=d_model, num_layers=args.num_layers)
+        for idx, name in enumerate(self.parts_name):
+            quantizer = QuantizeEMAReset(args.vqvae_arch_cfg['parts_code_nb'][name], d_model, args)
+            setattr(self, f'quantizer_{name}', quantizer)
+            decoder = Decoder_wo_upsample(part_dims[idx], d_model, down_t=args.down_t, stride_t=args.stride_t, width=args.vqvae_arch_cfg['parts_hidden_dim'][name], depth=args.depth, dilation_growth_rate=args.dilation_growth_rate, activation=args.vq_act, norm=args.vq_norm)
+            setattr(self, f'dec_{name}', decoder)
+
+    def forward(self, motion, text=None):
+        if self.args.lgvq==1 and text is not None and len(text) == 4:
+            text_feature, text_id, text_mask, motion_mask = text
+        else:
+            motion_mask, text_mask = None, None
+        # 特征增强
+        fused_feat = self.cmt(motion, motion_mask)  # [B, seq, d_model]
+        # 原始编码流程
+        x_out_list = []
+        loss_list = []
+        perplexity_list = []
+        x_quantized_list = []
+        for idx, name in enumerate(self.parts_name):
+            quantizer = getattr(self, f'quantizer_{name}')
+            decoder = getattr(self, f'dec_{name}')
+            x_encoder = fused_feat[idx, ...]
+            x_quantized, loss, perplexity = quantizer(rearrange(x_encoder, 'b t d -> b d t'))
+            x_quantized_list.append(x_quantized.permute(0,2,1))
+            loss_list.append(loss)
+            perplexity_list.append(perplexity)
+            x_decoder = decoder(x_quantized)
+            x_out_list.append(rearrange(x_decoder, 'b d t -> b t d'))
+        if self.args.lgvq==1 and len(text) == 4:
+            # text_feature, text_id, text_mask, motion_mask = text
+            _, loss = self.lgvq(x_quantized_list, [text_feature, text_id], text_mask, motion_mask)
+        else:
+            contrastive_loss = torch.tensor(0.0).to(motion[0].device)
+        return x_out_list, loss_list, perplexity_list, loss
+
 class LGVQ(nn.Module):
     def __init__(self, args,
                  d_model=256,
@@ -2783,6 +2837,180 @@ class LGVQ(nn.Module):
             contrastive_loss = torch.tensor(0.0).to(parts_feature[0].device)
         
         return feature, contrastive_loss
+from transformers import BertTokenizer, BertModel
+class LGVQv2(nn.Module):
+    def __init__(self, args,
+                 d_model=256,
+                 nhead=8,
+                 num_layers=4,
+                 global_token_mode = 1,
+                 bert_hidden_dim = 768,
+                 vocab_size = 30522,
+                 ):
+        super().__init__()
+        # 全身特征聚合Token
+        self.global_part_token = nn.Parameter(torch.randn(1, 1, d_model))
+        # 0 采用vit clstoken， 1采用pooling
+        self.global_token_mode = global_token_mode
+        if global_token_mode == 0:
+            self.global_time_token = nn.Parameter(torch.randn(1, 1, d_model))
+        # 增强的位置编码体系
+        self.part_position = nn.Embedding(6, d_model)  # 部件类型编码
+        # 不带结构约束的空间Transformer
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=4*d_model,
+            batch_first=True,
+        )
+        time_encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=4*d_model,
+            batch_first=True
+        )
+        self.spatial_transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.time_transformer = CausalTransformerEncoder(time_encoder_layer, num_layers=num_layers)
+        # args
+        self.args = args
+        self.contrastive_loss = ContrastiveLossWithSTSV2()
+        self.text_proj = nn.Linear(bert_hidden_dim, bert_hidden_dim)
+        # 新增时序对齐模块
+        self.seq_align = nn.Sequential(
+            nn.Linear(args.d_model, 4*args.d_model),
+            nn.GELU(),
+            nn.LayerNorm(4*args.d_model),
+            nn.Linear(4*args.d_model, args.d_model)
+        )
+        
+        # 增强跨模态注意力
+        self.cross_attention = nn.MultiheadAttention(
+            embed_dim=bert_hidden_dim,
+            num_heads=8,
+            batch_first=True
+        )
+        # 运动特征处理模块
+        self.motion_proj = nn.Sequential(
+            nn.Linear(args.d_model * 7, bert_hidden_dim),
+            nn.LayerNorm(bert_hidden_dim),
+            nn.GELU()
+        )
+        
+        self.mlm_head = nn.Sequential(
+            nn.Linear(bert_hidden_dim, bert_hidden_dim * 4),
+            nn.GELU(),
+            nn.LayerNorm(bert_hidden_dim * 4),
+            nn.Linear(bert_hidden_dim * 4, vocab_size)
+        )
+        self.temporal_fusion = nn.TransformerEncoder(
+            nn.TransformerEncoderLayer(
+                d_model=bert_hidden_dim,
+                nhead=8,
+                dim_feedforward=3072,
+                batch_first=True),
+            num_layers=2
+        )
+        self.bert_model = BertModel.from_pretrained('bert-base-uncased')
+        # self.bert_model.cuda()
+        self.bert_model.eval()  # 冻结BERT参数
+        self.vocab_size = vocab_size
+        self.motion_text_proj = nn.Linear(d_model, bert_hidden_dim)
+
+    def forward(self, parts_feature, text=None, text_mask = None, motion_mask=None):
+        self.bert_model.to(parts_feature[0].device)
+        # 部件特征预处理
+        B, T = parts_feature[0].shape[0], parts_feature[0].shape[1]
+        # 时空位置编码注入
+        part_embeds = []
+        for i,  feat in enumerate(parts_feature):
+            # 部件类型编码
+            part_embeds.append(feat + self.part_position.weight[i][None, None, :])
+        global_part_tokens = self.global_part_token.expand(B*T, -1, -1)
+        if self.global_token_mode == 0:
+            global_time_tokens = self.global_time_token.expand(B*7, -1, -1)
+        # 构建时空特征立方体 [B, T, 6, d_model]
+        spatial_cube = torch.stack(part_embeds, dim=2)
+        # spatial_cube = rearrange(spatial_cube, 'b t p d -> (b p) t d')
+        # 构建融合输入 [B*T, 7, d_model]（6个部件+1个全局Token）
+        fused_feat = torch.cat([
+            global_part_tokens,
+            rearrange(spatial_cube, 'b t p d -> (b t) p d', b=B)
+        ], dim=1)
+        # 空间维度交互 (部件间关系)        spatial_cube = spatial_cube + self.time_position[:, :T, :][None, :, None, :]
+        spatial_feat = rearrange(fused_feat, '(b t) p d-> (b t) p d', b=B, p=7)
+        
+        spatial_feat = self.spatial_transformer(spatial_feat)  # [B*T, 7, d]
+        
+        time_feat = rearrange(spatial_feat, '(b t) p d-> (b p) t d', b=B, p=7)
+        if self.global_token_mode==0:
+            time_feat = torch.cat([
+                global_time_tokens,
+                time_feat
+            ], dim=1)
+        if motion_mask is not None:
+            motion_mask = motion_mask.to(time_feat.device).bool()
+            time_key_padding_mask = motion_mask.repeat_interleave(7, dim=0)
+            time_feat = self.time_transformer(time_feat, src_key_padding_mask=~time_key_padding_mask)  # [T, B*7, d]
+        else:
+            time_feat = self.time_transformer(time_feat)
+        feature = rearrange(time_feat, '(b p) t d -> b t p d', b=B, p=7)
+        if self.global_token_mode == 0:
+            global_feat = feature[:, 0, 0, :]
+        else:
+            global_feat = feature[:, :, 0, :].mean(dim=1)
+        
+        if text is not None:
+            text_feature, text_id = text
+            if text_mask is not None:
+                # text_feature = text_mask['bert_features']
+                input_ids = text_mask['input_ids'].to(parts_feature[0].device)  # [B, seq_len]
+                labels = text_mask['labels'].to(parts_feature[0].device).float()
+                attention_mask = text_mask['attention_mask'].to(parts_feature[0].device).bool()
+                # text_feature_pooler = text_mask['bert_features_pool'].to(parts_feature[0].device).float()
+                with torch.no_grad():
+                    bert_outputs = self.bert_model(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask
+                    )
+                    text_feature = bert_outputs.last_hidden_state.to(parts_feature[0].device).float()
+                    text_feature_pooler = text_mask['feature'].to(parts_feature[0].device).float()
+            text_feature = text_feature.to(parts_feature[0].device).float()
+            # text_feature = self.text_proj(text_feature)
+            motion_feature_global = self.motion_text_proj(global_feat)  # [B, d_model]
+            motion_query = self.motion_proj(feature[:, :, 0, :])
+            # 跨模态注意力
+            if motion_mask is not None:
+                attn_output, _ = self.cross_attention(
+                    query=text_feature,
+                    key=motion_query,
+                    value=motion_query,
+                    key_padding_mask=~motion_mask
+                )  # [bs, seq_text, bert_hidden]
+            else:
+                attn_output, _ = self.cross_attention(
+                    query=text_feature,
+                    key=motion_query,
+                    value=motion_query
+                )
+            fused_features = self.temporal_fusion(
+                attn_output,
+                src_key_padding_mask=~attention_mask
+            )  # [bs, seq_text, bert_hidden]
+            logits = self.mlm_head(fused_features)  # [bs, seq_text, vocab_size]
+            
+            # 计算掩码损失
+            loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
+            active_loss = (labels != -100).view(-1)
+            active_logits = logits.view(-1, self.vocab_size)[active_loss]
+            active_labels = labels.view(-1)[active_loss]
+            
+            mlm_loss = loss_fct(active_logits, active_labels.long())
+            text_feature_pooler = self.text_proj(text_feature_pooler)
+            contrastive_loss = self.contrastive_loss(motion_feature_global, text_feature_pooler, text_id)
+        else:
+            contrastive_loss = torch.tensor(0.0).to(parts_feature[0].device)
+        
+        return feature, [contrastive_loss, mlm_loss]
 
 class HumanVQVAETransformer(nn.Module):
     def __init__(self,
@@ -3124,6 +3352,17 @@ class HumanVQVAETransformerV20(HumanVQVAETransformer):
     def __init__(self, args, **kwargs):
         super().__init__(args, **kwargs)
         self.enhancedvqvae = EnhancedVQVAEv20(args, args.d_model)
+        del self.tokenizer, self.text_encoder, self.vqvae
+
+    def forward(self, x, caption = None):
+        x_out_list, loss_list, perplexity_list, loss_extend = self.enhancedvqvae(x, caption)
+
+        return x_out_list, loss_list, perplexity_list, loss_extend
+
+class HumanVQVAETransformerV21(HumanVQVAETransformer):
+    def __init__(self, args, **kwargs):
+        super().__init__(args, **kwargs)
+        self.enhancedvqvae = EnhancedVQVAEv21(args, args.d_model)
         del self.tokenizer, self.text_encoder, self.vqvae
 
     def forward(self, x, caption = None):

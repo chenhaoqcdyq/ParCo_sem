@@ -88,7 +88,7 @@ def get_args_parser(args=None):
     parser.add_argument('--dataname', type=str, default='kit', help='dataset directory')
     parser.add_argument('--batch-size', default=128, type=int, help='batch size')
     parser.add_argument('--window-size', type=int, default=64, help='training motion length')
-
+    parser.add_argument('--ddp', action='store_true', help='whether use ddp')
     ## optimization
     parser.add_argument('--total-iter', default=200000, type=int, help='number of total iterations to run')
     parser.add_argument('--warm-up-iter', default=1000, type=int, help='number of total iterations for warmup')
@@ -101,8 +101,8 @@ def get_args_parser(args=None):
     parser.add_argument("--commit", type=float, default=0.02, help="hyper-parameter for the commitment loss")
     parser.add_argument('--loss-vel', type=float, default=0.1, help='hyper-parameter for the velocity loss')
     parser.add_argument('--recons-loss', type=str, default='l2', help='reconstruction loss')
-    parser.add_argument("--contrastive", type=float, default=0.2, help="hyper-parameter for the commitment loss")
-
+    parser.add_argument("--contrastive", type=float, default=0.5, help="hyper-parameter for the commitment loss")
+    parser.add_argument("--Disentangle", type=float, default=0.5, help="hyper-parameter for the commitment loss")
 
     parser.add_argument("--vqvae-cfg", type=str, help="Base config for vqvae")
 

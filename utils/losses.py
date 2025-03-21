@@ -60,7 +60,36 @@ class ReConsLossBodyPart(nn.Module):
         else:
             raise Exception()
 
-    def forward(self, motion_pred_list, motion_gt_list):
+    def _apply_mask(self, tensor_pred, tensor_gt, mask):
+        """
+        核心掩码处理逻辑：
+        tensor_pred: [B, T, D]
+        tensor_gt:   [B, T, D]
+        mask:        [B, T] 或 [B, T, 1]
+        """
+        # 确保mask维度对齐
+        if mask.dim() == 2:
+            mask = mask.unsqueeze(-1)  # [B, T] -> [B, T, 1]
+            
+        # 扩展mask到特征维度
+        mask = mask.expand_as(tensor_pred)  # [B, T, D]
+        
+        # # 计算逐元素损失（兼容不同损失类型）
+        # if isinstance(self.Loss, nn.MSELoss):
+        #     element_loss = (tensor_pred - tensor_gt)**2
+        # elif isinstance(self.Loss, nn.L1Loss):
+        #     element_loss = torch.abs(tensor_pred - tensor_gt)
+        # elif isinstance(self.Loss, nn.SmoothL1Loss):
+        #     element_loss = F.smooth_l1_loss(tensor_pred, tensor_gt, reduction='none')
+        element_loss = self.Loss(tensor_pred, tensor_gt)
+        
+        # 应用mask并计算有效区域的平均损失
+        masked_loss = element_loss * mask
+        sum_loss = masked_loss.sum()
+        num_valid = mask.sum() + 1e-8  # 防止除以零
+        return sum_loss / num_valid
+    
+    def forward(self, motion_pred_list, motion_gt_list, mask=None):
 
         assert len(motion_pred_list) == len(motion_gt_list)
 
@@ -74,11 +103,15 @@ class ReConsLossBodyPart(nn.Module):
             #  If so, there is no need to slice the motion_pred and motion_gt in the Loss function.
             assert motion_dim == motion_pred.shape[-1] == motion_gt.shape[-1]
             # todo: check if the slice of motion is necessary.
-            loss = self.Loss(motion_pred[..., : motion_dim], motion_gt[..., :motion_dim])
+            if mask is not None:
+                mask = mask.to(motion_pred.device).bool()
+                loss = self._apply_mask(motion_pred[..., : motion_dim], motion_gt[..., :motion_dim], mask)
+            else:
+                loss = self.Loss(motion_pred[..., : motion_dim], motion_gt[..., :motion_dim])
             loss_list.append(loss)
         return loss_list
 
-    def forward_vel(self, motion_pred_list, motion_gt_list):
+    def forward_vel(self, motion_pred_list, motion_gt_list, mask=None):
 
         assert len(motion_pred_list) == len(motion_gt_list)
 
@@ -86,7 +119,11 @@ class ReConsLossBodyPart(nn.Module):
         for i in range(len(motion_gt_list)):
             motion_pred = motion_pred_list[i]  # (bs, nframes, vel_dim)
             motion_gt = motion_gt_list[i]  # # (bs, nframes, vel_dim)
-            loss = self.Loss(motion_pred, motion_gt)
+            if mask is not None:
+                mask = mask.to(motion_pred.device).bool()
+                loss = self._apply_mask(motion_pred, motion_gt, mask)
+            else:
+                loss = self.Loss(motion_pred, motion_gt)
             loss_list.append(loss)
 
         return loss_list

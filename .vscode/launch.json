@@ -90,7 +90,7 @@
         "--exp-name=train_ParCo_rvq_sem",
         "--dataname=t2m",
         "--batch-size=32",
-        "--print-iter=50",
+        "--print-iter=10",
         "--lr=2e-4",
         "--total-iter=300000",
         "--lr-scheduler=200000",
@@ -102,7 +102,7 @@
         "--quantizer=ema_reset",
         "--loss-vel=0.5",
         "--recons-loss=l1_smooth",
-        "--vision=20",
+        "--vision=21",
         // "--decoder_vision=1",
         // "--num_quantizers=1",
         "--causal=True",
@@ -112,16 +112,12 @@
         "--d_model=256",
         "--with_attn=True",
         "--with_global=0",
-        "--resume-pth=output/00497-t2m-v18_attn/VQVAE-v18_attn-t2m-default/net_last.pth",
-        "--lgvq=1"
+        // "--text_dim=768",
+        "--resume-pth=output/00555-t2m-v6_512/VQVAE-v6_512-t2m-default/net_best_fid.pth",
+        "--lgvq=1",
         // "--with_global=0"
-        // "--eval-iter=100",
-        // "--warm-up-iter=100",
-        // "--resume-pth=output/00449-t2m-v13_cos/VQVAE-v13_cos-t2m-default/net_last.pth"
-        // "--resume-pth=output/00381-t2m-v6/VQVAE-v6-t2m-default/net_best_fid.pth"
-        // "--resume-pth=output/00350-t2m-v4/VQVAE-v4-t2m-default/net_best_fid.pth"
-        // "--resume-pth=output/00286-t2m-sem_plus/VQVAE-sem_plus-t2m-default/net_last.pth"
-        // python train_ParCo_rvq_sem.py --out-dir=output --exp-name=v4 --dataname=t2m --batch-size=512 --print-iter=50 --lr=2e-4 --total-iter=300000 --lr-scheduler=200000 --vqvae-cfg=default --down-t=2 --depth=3 --dilation-growth-rate=3 --vq-act=relu --quantizer=ema_reset --loss-vel=0.5 --recons-loss=l1_smooth --vision=4 --decoder_vision=2
+        // "--eval-iter=10",
+        "--warm-up-iter=10"
         // export CUDA_VISIBLE_DEVICES=0 && python train_ParCo_rvq_sem.py --out-dir=output --exp-name=v13 --dataname=t2m --batch-size=256 --print-iter=200 --lr=2e-4 --total-iter=300000 --lr-scheduler=200000 --vqvae-cfg=default --down-t=2 --depth=3 --dilation-growth-rate=3 --vq-act=relu --quantizer=ema_reset --loss-vel=0.5 --recons-loss=l1_smooth --vision=13 --num-layers=8 --position=1 --causal=False
       ],
       "justMyCode": false,
@@ -146,6 +142,84 @@
   //     "args": [
   //       "--vqvae-train-dir=output/ParCo_official_HumanML3D/VQVAE-ParCo-t2m-default",
   //       "--select-vqvae-ckpt=fid"
+  //     ],
+  //     "justMyCode": false,
+  //     "env": {
+  //       "PYTHONPATH": "${workspaceFolder}/..:${env:PYTHONPATH}",
+  //       "TORCH_DISTRIBUTED_DEBUG": "INFO",
+  //       "CUDA_VISIBLE_DEVICES": "1",
+  //       "TOKENIZERS_PARALLELISM": "false"
+  //     }
+  //   }
+  // ]
+  // "version": "0.2.0",
+  // "configurations": [
+  //   {
+  //     "name": "Python 调试程序: 包含参数的当前文件",
+  //     "type": "debugpy",
+  //     "request": "launch",
+  //     // "program": "models/semantic.py",
+  //     "program": "dataset/dataset_text_mask.py",
+  //     "console": "integratedTerminal",
+  //     "args": [
+  //       // "--vqvae-train-dir=output/ParCo_official_HumanML3D/VQVAE-ParCo-t2m-default",
+  //       // "--select-vqvae-ckpt=fid"
+  //     ],
+  //     "justMyCode": false,
+  //     "env": {
+  //       "PYTHONPATH": "${workspaceFolder}/..:${env:PYTHONPATH}",
+  //       "TORCH_DISTRIBUTED_DEBUG": "INFO",
+  //       "CUDA_VISIBLE_DEVICES": "1",
+  //       "TOKENIZERS_PARALLELISM": "false"
+  //     }
+  //   }
+  // ]
+  // "version": "0.2.0",
+  // "configurations": [
+  //   {
+  //     "name": "Python 调试程序: 包含参数的当前文件",
+  //     "type": "python",
+  //     "request": "launch",
+  //     // "program": "train_ParCo_rvq_eval.py",
+  //     "program": "/root/miniconda3/envs/motioncraft/bin/torchrun",
+  //     "console": "integratedTerminal",
+  //     "args": [
+  //       "--nproc_per_node=1",
+  //       "train_ParCo_rvq_sem.py",
+  //       "--ddp",
+  //       "--out-dir=output",
+  //       "--exp-name=train_ParCo_rvq_sem",
+  //       "--dataname=t2m",
+  //       "--batch-size=32",
+  //       "--print-iter=10",
+  //       "--lr=2e-4",
+  //       "--total-iter=300000",
+  //       "--lr-scheduler=200000",
+  //       "--vqvae-cfg=default",
+  //       "--down-t=2",
+  //       "--depth=3",
+  //       "--dilation-growth-rate=3",
+  //       "--vq-act=relu",
+  //       "--quantizer=ema_reset",
+  //       "--loss-vel=0.5",
+  //       "--recons-loss=l1_smooth",
+  //       "--vision=21",
+  //       // "--decoder_vision=1",
+  //       // "--num_quantizers=1",
+  //       "--causal=True",
+  //       // "--position=1",
+  //       "--num-layers=2",
+  //       "--numdec-layers=3",
+  //       "--d_model=256",
+  //       "--with_attn=True",
+  //       "--with_global=0",
+  //       // "--text_dim=768",
+  //       "--resume-pth=output/00555-t2m-v6_512/VQVAE-v6_512-t2m-default/net_best_fid.pth",
+  //       "--lgvq=1",
+  //       // "--with_global=0"
+  //       // "--eval-iter=10",
+  //       "--warm-up-iter=10"
+  //       // export CUDA_VISIBLE_DEVICES=0 && python train_ParCo_rvq_sem.py --out-dir=output --exp-name=v13 --dataname=t2m --batch-size=256 --print-iter=200 --lr=2e-4 --total-iter=300000 --lr-scheduler=200000 --vqvae-cfg=default --down-t=2 --depth=3 --dilation-growth-rate=3 --vq-act=relu --quantizer=ema_reset --loss-vel=0.5 --recons-loss=l1_smooth --vision=13 --num-layers=8 --position=1 --causal=False
   //     ],
   //     "justMyCode": false,
   //     "env": {

@@ -232,21 +232,62 @@ class Decoder(nn.Module):
     def forward(self, x):
         return self.model(x)
     
+# class Decoder_wo_upsample(nn.Module):
+#     def __init__(self,
+#                  input_emb_width = 3,
+#                  output_emb_width = 512,
+#                  down_t = 3,
+#                  stride_t = 2,
+#                  width = 512,
+#                  depth = 3,
+#                  dilation_growth_rate = 3, 
+#                  activation='relu',
+#                  norm=None,
+#                  with_attn=False):
+#         super().__init__()
+#         blocks = []
+        
+#         filter_t, pad_t = stride_t * 2, stride_t // 2
+#         self.with_attn = with_attn
+#         blocks.append(nn.Conv1d(output_emb_width, width, 3, 1, 1))
+#         blocks.append(nn.ReLU())
+#         for i in range(down_t):
+#             out_dim = width
+#             if self.with_attn:
+#                 block = nn.Sequential(
+#                     MotionAttention(width, num_heads=8),
+#                     Resnet1D(width, depth, dilation_growth_rate, reverse_dilation=True, activation=activation, norm=norm),
+#                     nn.Conv1d(width, out_dim, 3, 1, 1)
+#                 )
+#             else:
+#                 block = nn.Sequential(
+#                     Resnet1D(width, depth, dilation_growth_rate, reverse_dilation=True, activation=activation, norm=norm),
+#                     nn.Conv1d(width, out_dim, 3, 1, 1)
+#                 )
+#             blocks.append(block)
+#         blocks.append(nn.Conv1d(width, width, 3, 1, 1))
+#         blocks.append(nn.ReLU())
+#         blocks.append(nn.Conv1d(width, input_emb_width, 3, 1, 1))
+#         self.model = nn.Sequential(*blocks)
+
+#     def forward(self, x):
+#         return self.model(x)
+
 class Decoder_wo_upsample(nn.Module):
     def __init__(self,
-                 input_emb_width = 3,
-                 output_emb_width = 512,
-                 down_t = 3,
-                 stride_t = 2,
-                 width = 512,
-                 depth = 3,
-                 dilation_growth_rate = 3, 
+                 input_emb_width=3,
+                 output_emb_width=512,
+                 down_t=3,
+                 stride_t=2,
+                 width=512,
+                 depth=3,
+                 dilation_growth_rate=3,
                  activation='relu',
                  norm=None,
                  with_attn=False):
         super().__init__()
         blocks = []
-        
+
         filter_t, pad_t = stride_t * 2, stride_t // 2
         self.with_attn = with_attn
         blocks.append(nn.Conv1d(output_emb_width, width, 3, 1, 1))
@@ -254,24 +295,39 @@ class Decoder_wo_upsample(nn.Module):
         for i in range(down_t):
             out_dim = width
             if self.with_attn:
-                block = nn.Sequential(
-                    MotionAttention(width, num_heads=8),
-                    Resnet1D(width, depth, dilation_growth_rate, reverse_dilation=True, activation=activation, norm=norm),
-                    nn.Conv1d(width, out_dim, 3, 1, 1)
-                )
+                block = nn.ModuleDict({
+                    'attention': MotionAttention(width, num_heads=8),
+                    'resnet': Resnet1D(width, depth, dilation_growth_rate, reverse_dilation=True, activation=activation, norm=norm),
+                    'conv': nn.Conv1d(width, out_dim, 3, 1, 1)
+                })
             else:
-                block = nn.Sequential(
-                    Resnet1D(width, depth, dilation_growth_rate, reverse_dilation=True, activation=activation, norm=norm),
-                    nn.Conv1d(width, out_dim, 3, 1, 1)
-                )
+                block = nn.ModuleDict({
+                    'resnet': Resnet1D(width, depth, dilation_growth_rate, reverse_dilation=True, activation=activation, norm=norm),
+                    'conv': nn.Conv1d(width, out_dim, 3, 1, 1)
+                })
             blocks.append(block)
         blocks.append(nn.Conv1d(width, width, 3, 1, 1))
         blocks.append(nn.ReLU())
         blocks.append(nn.Conv1d(width, input_emb_width, 3, 1, 1))
-        self.model = nn.Sequential(*blocks)
+        self.blocks = nn.ModuleList(blocks)
 
-    def forward(self, x):
-        return self.model(x)
+    def forward(self, x, motion_mask=None):
+        """ 
+        Args:
+            x: 输入特征 [B, C, T]
+            motion_mask: 注意力掩码 [B, 1, T] 或 None
+        """
+        x = self.blocks[0](x)  # 第一层卷积
+        x = self.blocks[1](x)  # 第一层激活
+        for block in self.blocks[2:-3]:  # 遍历解码块
+            if 'attention' in block:
+                x = block['attention'](x, motion_mask)  # 传递 motion_mask
+            x = block['resnet'](x)
+            x = block['conv'](x)
+        x = self.blocks[-3](x)  # 倒数第二层卷积
+        x = self.blocks[-2](x)  
+        x = self.blocks[-1](x)  # 最后一层卷积
+        return x
 
 class Upsample(nn.Module):
     def __init__(self, in_channels, with_conv):
@@ -291,28 +347,26 @@ class MotionAttention(nn.Module):
     """运动序列注意力机制"""
     def __init__(self, dim, num_heads=4, residual=True):
         super().__init__()
-        self.num_heads = num_heads
-        self.scale = (dim // num_heads) ** -0.5
         self.residual = residual
-        self.to_qkv = nn.Linear(dim, dim * 3)
+        self.attn = nn.MultiheadAttention(embed_dim=dim, num_heads=num_heads, batch_first=True)
+        # self.to_qkv = nn.Linear(dim, dim * 3)
         self.proj = nn.Linear(dim, dim)
         
-    def forward(self, x):
+    def forward(self, x, motion_mask = None):
         x = x.permute(0, 2, 1)  # (B, D, L)
         B, L, D = x.shape
         residual_x = x
-        qkv = self.to_qkv(x).chunk(3, dim=-1)
-        q, k, v = map(lambda t: t.reshape(B, L, self.num_heads, -1).permute(0, 2, 1, 3), qkv)
-        
-        attn = (q @ k.transpose(-2, -1)) * self.scale
-        attn = attn.softmax(dim=-1)
-        
-        x = (attn @ v).permute(0, 2, 1, 3).reshape(B, L, D)
+        if motion_mask is not None:
+            motion_mask = motion_mask.permute(0, 2, 1)
+            x = self.attn(x, x, x, key_padding_mask=motion_mask)[0]
+        else:
+            x = self.attn(x, x, x)[0]
         if self.residual:
             result = self.proj(x) + residual_x
         else:
             result = self.proj(x)
         return result.permute(0, 2, 1)
+
 
 class MotionDecoder(nn.Module):
     def __init__(self, 
