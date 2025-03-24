@@ -252,6 +252,7 @@ for nb_iter in range(1, args.warm_up_iter):
     if args.ddp: 
         train_loader.sampler.set_epoch(nb_iter)
     optimizer, current_lr = update_lr_warm_up(optimizer, nb_iter, args.warm_up_iter, args.lr)
+    # train_loader_iter = dataset_VQ_bodypart_text.cycle(train_loader)
     batch = next(train_loader_iter)
     if len(batch) == 3:
         gt_parts, text, text_id = batch
@@ -269,12 +270,15 @@ for nb_iter in range(1, args.warm_up_iter):
 
     if args.vision >= 21:
         cond = [text_feature, text_id, text_mask, motion_mask]
+        # print(args.vision, "cond = [text_feature, text_id, text_mask, motion_mask]")
     elif args.vision >= 17:
         cond = [text_feature, text_id]
         motion_mask = None
+        # print(args.vision, "cond = [text_feature, text_id]")
     else:
         cond = text
         motion_mask = None
+        # print(args.vision, "cond = text")
     pred_parts, loss_commit_list, perplexity_list, loss_extend = net(gt_parts, cond)
     # contrastive_loss = loss_extend['contrastive']
     if isinstance(loss_extend, list):
@@ -353,8 +357,12 @@ for nb_iter in range(1, args.total_iter + 1):
         raise ValueError("The length of batch is not correct.")
     for i in range(len(gt_parts)):
         gt_parts[i] = gt_parts[i].to(device).float()
-    if args.vision >= 21:
+    if args.vision >= 21 and nb_iter > args.sem_iter:
         cond = [text_feature, text_id, text_mask, motion_mask]
+        if train_loader.dataset.strategy == 'basic':
+            train_loader.dataset.strategy = 'medium'
+            train_loader_iter = dataset_VQ_bodypart_text.cycle(train_loader)
+            
     elif args.vision >= 17:
         cond = [text_feature, text_id]
         motion_mask = None

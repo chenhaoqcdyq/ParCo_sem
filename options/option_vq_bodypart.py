@@ -94,6 +94,7 @@ def get_args_parser(args=None):
     parser.add_argument('--warm-up-iter', default=1000, type=int, help='number of total iterations for warmup')
     parser.add_argument('--lr', default=2e-4, type=float, help='max learning rate')
     parser.add_argument('--lr-scheduler', default=[50000, 400000], nargs="+", type=int, help="learning rate schedule (iterations)")
+    parser.add_argument('--sem-iter', default=100000, type=int, help='number of iterations for semantic loss')
     parser.add_argument('--gamma', default=0.05, type=float, help="learning rate decay")
     parser.add_argument('--clip_grad', default=0.99, type=float, help='clip grad norm')
 

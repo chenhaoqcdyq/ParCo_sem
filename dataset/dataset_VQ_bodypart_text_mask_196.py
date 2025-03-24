@@ -15,11 +15,11 @@ from transformers import BertTokenizer, BertModel
 from transformers import CLIPModel, CLIPTokenizer
 
 class VQMotionDatasetBodyPart(data.Dataset):
-    def __init__(self, dataset_name, window_size=64, unit_length=4, print_warning=False, strategy='basic'):
+    def __init__(self, dataset_name, window_size=64, unit_length=4, print_warning=False, strategy='basic', with_clip=False):
         self.window_size = window_size
         self.unit_length = unit_length
         self.dataset_name = dataset_name
-
+        self.with_clip = with_clip
         if dataset_name == 't2m':
             self.data_root = './dataset/HumanML3D'
             self.motion_dir = pjoin(self.data_root, 'new_joint_vecs')
@@ -43,10 +43,12 @@ class VQMotionDatasetBodyPart(data.Dataset):
             self.meta_dir = 'checkpoints/kit/Decomp_SP001_SM001_H512/meta'
         self.text_mask_dir =  pjoin(self.data_root, 'texts_mask_deepseek')
         self.bert_feature_dir = pjoin(self.data_root, 'texts_bert_feature')
-        os.makedirs(self.text_token_dir, exist_ok=True)
-        os.makedirs(self.text_feature_dir, exist_ok=True)
+        if self.with_clip:
+            os.makedirs(self.text_token_dir, exist_ok=True)
+            os.makedirs(self.text_feature_dir, exist_ok=True)
         os.makedirs(self.bert_feature_dir, exist_ok=True)
-        clip_model, preprocess = clip.load('ViT-B/32')
+        if self.with_clip:
+            clip_model, preprocess = clip.load('ViT-B/32')
         joints_num = self.joints_num
         
         
@@ -85,32 +87,39 @@ class VQMotionDatasetBodyPart(data.Dataset):
                             text_data.append(caption)
                 # text_mask_path = pjoin(self.text_mask_dir, name + '.json')
                 # text = ' '.join(text_data)  # 合并所有caption
-                device = clip_model.text_projection.device
-                self.lengths.append(motion.shape[0] - self.window_size)
-                if not os.path.exists(text_tokens_path):
-                    text_tokens = clip.tokenize(text_data, truncate = True).to(device)
-                    torch.save(text_tokens, text_tokens_path)
+                if self.with_clip:
+                    device = clip_model.text_projection.device
+                    self.lengths.append(motion.shape[0] - self.window_size)
+                    if not os.path.exists(text_tokens_path):
+                        text_tokens = clip.tokenize(text_data, truncate = True).to(device)
+                        torch.save(text_tokens, text_tokens_path)
+                    else:
+                        text_tokens = torch.load(text_tokens_path, map_location=torch.device('cpu'))
+                    text_feature_path = pjoin(self.text_feature_dir, name + '.pth')
+                    if not os.path.exists(text_feature_path):
+                        with torch.no_grad():
+                            text_features = clip_model.encode_text(text_tokens)
+                        torch.save(text_features, text_feature_path)
+                        
+                    else:
+                        text_features = torch.load(text_feature_path, map_location=torch.device('cpu'))
+                    name_list.append(name)
+                    self.data.append({
+                    'motion': motion,      # 保持原始运动数据格式
+                    'text': text_data,           # 新增文本信息
+                    'text_token':text_tokens.cpu(),
+                    'text_feature': text_features.cpu(),
+                    'text_feature_all': text_features.cpu(),
+                    # 'text_mask':text_mask_data,
+                    'text_id': name
+                    })
                 else:
-                    text_tokens = torch.load(text_tokens_path, map_location=torch.device('cpu'))
-                text_feature_path = pjoin(self.text_feature_dir, name + '.pth')
-                if not os.path.exists(text_feature_path):
-                    with torch.no_grad():
-                        text_features = clip_model.encode_text(text_tokens)
-                    torch.save(text_features, text_feature_path)
-                    
-                else:
-                    text_features = torch.load(text_feature_path, map_location=torch.device('cpu'))
-                name_list.append(name)
-                self.data.append({
-                'motion': motion,      # 保持原始运动数据格式
-                'text': text_data,           # 新增文本信息
-                'text_token':text_tokens.cpu(),
-                'text_feature': text_features.cpu(),
-                'text_feature_all': text_features.cpu(),
-                # 'text_mask':text_mask_data,
-                'text_id': name
-                })
-
+                    name_list.append(name)
+                    self.data.append({
+                    'motion': motion,      # 保持原始运动数据格式
+                    'text': text_data,           # 新增文本信息
+                    'text_id': name
+                    })
             except:
                 # Some motion may not exist in KIT dataset
                 print('Unable to load:', name)
@@ -261,21 +270,21 @@ class VQMotionDatasetBodyPart(data.Dataset):
         data = self.data[item]
         motion = data['motion']
         text_list = data['text']
-        text_tokens = data['text_token'].cpu()
-        text_features = data['text_feature'].cpu()
-        text_feature_alls = data['text_feature_all'].cpu()
+        
         text_id = data['text_id']
         
         text_random_id = random.randint(0, len(text_list) - 1)
         text = text_list[text_random_id]
-        text_token = text_tokens[text_random_id]
-        text_feature = text_features[text_random_id]
-        text_feature_all = text_feature_alls[text_random_id]
-        # text_mask = text_mask["samples"][text_random_id]
-        # if text_feature.shape[0] != 512:
-        #     print('text_feature:', text_feature)
-        if len(text_list) != text_tokens.shape[0]:
-            print('text_feature:', text_tokens)
+        if self.with_clip:
+            text_tokens = data['text_token'].cpu()
+            text_features = data['text_feature'].cpu()
+            text_feature_alls = data['text_feature_all'].cpu()
+            text_token = text_tokens[text_random_id]
+            text_feature = text_features[text_random_id]
+            text_feature_all = text_feature_alls[text_random_id]
+
+            if len(text_list) != text_tokens.shape[0]:
+                print('text_feature:', text_tokens)
 
         # Preprocess. We should set the slice of motion at getitem stage, not in the initialization.
         # If in the initialization, the augmentation of motion slice will be fixed, which will damage the diversity.
@@ -331,7 +340,10 @@ class VQMotionDatasetBodyPart(data.Dataset):
             'labels': labels,
             'feature': text_bert_feature
         }
-        return [Root, R_Leg, L_Leg, Backbone, R_Arm, L_Arm], text, text_token, text_feature, text_feature_all, text_id, text_mask, motion_mask
+        if self.with_clip:
+            return [Root, R_Leg, L_Leg, Backbone, R_Arm, L_Arm], text, text_token, text_feature, text_feature_all, text_id, text_mask, motion_mask
+        else:
+            return [Root, R_Leg, L_Leg, Backbone, R_Arm, L_Arm], text, text_id, text_id, text_id, text_id, text_mask, motion_mask
 
 class DynamicMaskGenerator:
     def __init__(self, 

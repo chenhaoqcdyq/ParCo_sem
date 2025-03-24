@@ -102,23 +102,23 @@
         "--quantizer=ema_reset",
         "--loss-vel=0.5",
         "--recons-loss=l1_smooth",
-        "--vision=21",
+        "--vision=22",
         // "--decoder_vision=1",
         // "--num_quantizers=1",
         "--causal=True",
         // "--position=1",
         "--num-layers=2",
-        "--numdec-layers=3",
+        // "--numdec-layers=3",
         "--d_model=256",
         "--with_attn=True",
-        "--with_global=0",
+        // "--with_global=0",
         // "--text_dim=768",
         "--resume-pth=output/00555-t2m-v6_512/VQVAE-v6_512-t2m-default/net_best_fid.pth",
         "--lgvq=1",
         // "--with_global=0"
         // "--eval-iter=10",
-        "--warm-up-iter=10"
-        // export CUDA_VISIBLE_DEVICES=0 && python train_ParCo_rvq_sem.py --out-dir=output --exp-name=v13 --dataname=t2m --batch-size=256 --print-iter=200 --lr=2e-4 --total-iter=300000 --lr-scheduler=200000 --vqvae-cfg=default --down-t=2 --depth=3 --dilation-growth-rate=3 --vq-act=relu --quantizer=ema_reset --loss-vel=0.5 --recons-loss=l1_smooth --vision=13 --num-layers=8 --position=1 --causal=False
+        // "--warm-up-iter=10"
+        // export CUDA_VISIBLE_DEVICES=0 && python train_ParCo_rvq_sem.py --out-dir=output --exp-name=v21 --dataname=t2m --batch-size=64 --print-iter=200 --lr=5e-5 --total-iter=300000 --lr-scheduler=200000 --vqvae-cfg=default --down-t=2 --depth=3 --dilation-growth-rate=3 --vq-act=relu --quantizer=ema_reset --loss-vel=0.5 --recons-loss=l1_smooth --vision=21 --num-layers=2 --causal=False
       ],
       "justMyCode": false,
       "env": {
