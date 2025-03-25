@@ -287,9 +287,9 @@ class Decoder_wo_upsample(nn.Module):
                  with_attn=False):
         super().__init__()
         blocks = []
-
-        filter_t, pad_t = stride_t * 2, stride_t // 2
         self.with_attn = with_attn
+        # if with_attn:
+        filter_t, pad_t = stride_t * 2, stride_t // 2
         blocks.append(nn.Conv1d(output_emb_width, width, 3, 1, 1))
         blocks.append(nn.ReLU())
         for i in range(down_t):
@@ -310,13 +310,37 @@ class Decoder_wo_upsample(nn.Module):
         blocks.append(nn.ReLU())
         blocks.append(nn.Conv1d(width, input_emb_width, 3, 1, 1))
         self.blocks = nn.ModuleList(blocks)
-
+        # else:
+        #     filter_t, pad_t = stride_t * 2, stride_t // 2
+            
+        #     blocks.append(nn.Conv1d(output_emb_width, width, 3, 1, 1))
+        #     blocks.append(nn.ReLU())
+        #     for i in range(down_t):
+        #         out_dim = width
+        #         if self.with_attn:
+        #             block = nn.Sequential(
+        #                 MotionAttention(width, num_heads=8),
+        #                 Resnet1D(width, depth, dilation_growth_rate, reverse_dilation=True, activation=activation, norm=norm),
+        #                 nn.Conv1d(width, out_dim, 3, 1, 1)
+        #             )
+        #         else:
+        #             block = nn.Sequential(
+        #                 Resnet1D(width, depth, dilation_growth_rate, reverse_dilation=True, activation=activation, norm=norm),
+        #                 nn.Conv1d(width, out_dim, 3, 1, 1)
+        #             )
+        #         blocks.append(block)
+        #     blocks.append(nn.Conv1d(width, width, 3, 1, 1))
+        #     blocks.append(nn.ReLU())
+        #     blocks.append(nn.Conv1d(width, input_emb_width, 3, 1, 1))
+        #     self.model = nn.Sequential(*blocks)
+            
     def forward(self, x, motion_mask=None):
         """ 
         Args:
             x: 输入特征 [B, C, T]
             motion_mask: 注意力掩码 [B, 1, T] 或 None
         """
+        # if self.with_attn:
         x = self.blocks[0](x)  # 第一层卷积
         x = self.blocks[1](x)  # 第一层激活
         for block in self.blocks[2:-3]:  # 遍历解码块
@@ -328,6 +352,9 @@ class Decoder_wo_upsample(nn.Module):
         x = self.blocks[-2](x)  
         x = self.blocks[-1](x)  # 最后一层卷积
         return x
+        # else:
+        #     return self.model(x)
+        
 
 class Upsample(nn.Module):
     def __init__(self, in_channels, with_conv):

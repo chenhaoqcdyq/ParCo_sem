@@ -207,6 +207,7 @@ if args.resume_pth:
         net.load_state_dict(ckpt['net'], strict=False)
     
 net.train()
+# net.eval()
 net.to(device)
 
 ##### ---- Dataloader ---- #####
@@ -357,9 +358,9 @@ for nb_iter in range(1, args.total_iter + 1):
         raise ValueError("The length of batch is not correct.")
     for i in range(len(gt_parts)):
         gt_parts[i] = gt_parts[i].to(device).float()
-    if args.vision >= 21 and nb_iter > args.sem_iter:
+    if args.vision >= 21:
         cond = [text_feature, text_id, text_mask, motion_mask]
-        if train_loader.dataset.strategy == 'basic':
+        if nb_iter > args.sem_iter and train_loader.dataset.strategy == 'basic' :
             train_loader.dataset.strategy = 'medium'
             train_loader_iter = dataset_VQ_bodypart_text.cycle(train_loader)
             

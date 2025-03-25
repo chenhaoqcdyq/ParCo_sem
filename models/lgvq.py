@@ -4,441 +4,684 @@ import torch.nn.functional as F
 from einops import rearrange
 # from transformers import CLIPModel, CLIPTokenizer
 import clip
+from models.quantize_cnn import QuantizeEMAReset
+# from models.rvqvae_bodypart import CausalTransformerEncoder, ContrastiveLossWithSTSV2
 from models.vqvae_bodypart import VQVAE_bodypart
 
-class T2M_VQVAE_LG(VQVAE_bodypart):
-    def __init__(self, args,
-                 parts_code_nb={},  # numbers of quantizer's embeddings
-                 parts_code_dim={},  # dimension of quantizer's embeddings
-                 parts_output_dim={},  # dims of encoder's output
-                 parts_hidden_dim={},  # actually this is the hidden dimension of the conv net.
-                 down_t=3,
-                 stride_t=2,
-                 depth=3,
-                 dilation_growth_rate=3,
-                 activation='relu',
-                 norm=None, 
-                 text_dim=512,
-                 num_heads=4,
-                 num_layers=2,
-                 clip_model_name='ViT-B/32'):
-        super().__init__(args, parts_code_nb, parts_code_dim, parts_output_dim, parts_hidden_dim, 
-                         down_t, stride_t, depth, dilation_growth_rate, activation, norm)
-        
-        # Original VQVAE components
-        self.text_feat_dim = 512
-        
-        self.clip, self.preprocess_clip = self.load_clip(clip_model_name)
+class CausalTransformerEncoder(nn.TransformerEncoder):
+    """带因果掩码的Transformer编码器"""
+    def forward(self, src, mask=None, **kwargs):
+        # 自动生成因果掩码
+        if mask is None:
+            device = src.device
+            seq_len = src.size(1)
+            causal_mask = torch.triu(torch.ones(seq_len, seq_len, device=device), diagonal=1).bool()
+            return super().forward(src, mask=causal_mask, **kwargs)
+        return super().forward(src, mask, **kwargs)
 
-        self.vit = nn.ModuleDict(
-            {name: MotionViT(self.parts_output_dim[name], num_layers, num_heads) for name in self.parts_output_dim}
+class ContrastiveLossWithSTS(nn.Module):
+    def __init__(self, temperature=0.07, threshold=0.85):
+        super().__init__()
+        self.temperature = temperature
+        self.threshold = threshold
+
+    def _get_similarity_matrix(self, text_embeds):
+        text_embeds = F.normalize(text_embeds, p=2, dim=-1)
+        sim_matrix = torch.mm(text_embeds, text_embeds.T)
+        return sim_matrix.cpu()
+
+    def forward(self, motion_feat, text_feat, texts_feature):
+        """
+        motion_feat: [B, D] 动作特征
+        text_feat: [B, D] 文本特征
+        texts: List[str] 原始文本
+        """
+        # 计算文本语义相似度
+        sim_matrix = self._get_similarity_matrix(texts_feature)  # [B, B]
+        
+        # 生成正样本掩码（GPU计算）
+        pos_mask = (sim_matrix > self.threshold).float().to(motion_feat.device)
+        # pos_mask.fill_diagonal_(0)  # 排除自身
+        
+        # 特征归一化
+        motion_feat = F.normalize(motion_feat, dim=-1)
+        text_feat = F.normalize(text_feat, dim=-1)
+        
+        # 计算logits
+        logits_per_motion = torch.mm(motion_feat, text_feat.T) / self.temperature  # [B, B]
+        logits_per_text = logits_per_motion.T
+        
+        # 多正样本对比损失
+        exp_logits = torch.exp(logits_per_motion)
+        numerator = torch.sum(exp_logits * pos_mask, dim=1)  # 分子：正样本相似度
+        denominator = torch.sum(exp_logits, dim=1)          # 分母：所有样本
+        
+        # 避免除零
+        valid_pos = (pos_mask.sum(dim=1) > 0)
+        loss_motion = -torch.log(numerator[valid_pos]/denominator[valid_pos]).sum()
+        
+        # 对称文本到动作损失
+        exp_logits_text = torch.exp(logits_per_text)
+        numerator_text = torch.sum(exp_logits_text * pos_mask, dim=1)
+        denominator_text = torch.sum(exp_logits_text, dim=1)
+        loss_text = -torch.log(numerator_text[valid_pos]/denominator_text[valid_pos]).sum()
+        
+        return (loss_motion + loss_text) / 2
+
+class ContrastiveLossWithSTSV2(nn.Module):
+    def __init__(self, temperature=0.07):
+        super().__init__()
+        self.temperature = temperature
+
+    def forward(self, motion_feat, text_feat, text_id):
+        """
+        motion_feat: [B, D] 动作特征
+        text_feat: [B, D] 文本特征
+        texts: List[str] 原始文本
+        """
+        pos_mask = torch.zeros(len(text_id), len(text_id), device=motion_feat.device)
+        for i in range(len(text_id)):
+            for j in range(len(text_id)):
+                if text_id[i] == text_id[j]:
+                    pos_mask[i, j] = 1
+        # 特征归一化
+        motion_feat = F.normalize(motion_feat, dim=-1)
+        text_feat = F.normalize(text_feat, dim=-1)
+        
+        # 计算logits
+        logits_per_motion = torch.mm(motion_feat, text_feat.T) / self.temperature  # [B, B]
+        logits_per_text = logits_per_motion.T
+        
+        # 多正样本对比损失
+        exp_logits = torch.exp(logits_per_motion)
+        numerator = torch.sum(exp_logits * pos_mask, dim=1)  # 分子：正样本相似度
+        denominator = torch.sum(exp_logits, dim=1)          # 分母：所有样本
+        
+        # 避免除零
+        valid_pos = (pos_mask.sum(dim=1) > 0)
+        loss_motion = -torch.log(numerator[valid_pos]/denominator[valid_pos]).mean()
+        
+        # 对称文本到动作损失
+        exp_logits_text = torch.exp(logits_per_text)
+        numerator_text = torch.sum(exp_logits_text * pos_mask, dim=1)
+        denominator_text = torch.sum(exp_logits_text, dim=1)
+        loss_text = -torch.log(numerator_text[valid_pos]/denominator_text[valid_pos]).mean()
+        
+        return (loss_motion + loss_text) / 2
+    
+    def compute_disentangle_loss(self, quant_vis, quant_sem, disentanglement_ratio=0.1):
+        quant_vis = rearrange(quant_vis, 'b t c -> (b t) c')
+        quant_sem = rearrange(quant_sem, 'b t c -> (b t) c')
+
+        quant_vis = F.normalize(quant_vis, p=2, dim=-1)
+        quant_sem = F.normalize(quant_sem, p=2, dim=-1)
+
+        dot_product = torch.sum(quant_vis * quant_sem, dim=1)
+        loss = torch.mean(dot_product ** 2) * disentanglement_ratio
+
+        return loss
+
+# clip版本的lgvq
+class LGVQ(nn.Module):
+    def __init__(self, args,
+                 d_model=256,
+                 nhead=8,
+                 num_layers=4,
+                 global_token_mode = 1,
+                 ):
+        super().__init__()
+        # 全身特征聚合Token
+        self.global_part_token = nn.Parameter(torch.randn(1, 1, d_model))
+        # 0 采用vit clstoken， 1采用pooling
+        self.global_token_mode = global_token_mode
+        if global_token_mode == 0:
+            self.global_time_token = nn.Parameter(torch.randn(1, 1, d_model))
+        # 增强的位置编码体系
+        self.part_position = nn.Embedding(6, d_model)  # 部件类型编码
+        # 不带结构约束的空间Transformer
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=4*d_model,
+            batch_first=True,
         )
-        self.cls_token = {
-            # name: nn.Parameter(torch.randn(1, 1, part_dim)) for name, part_dim in self.parts_output_dim.items()
-            name: self.create_positional_encoding(part_dim, 1, idx) for idx, (name, part_dim) in enumerate(self.parts_output_dim.items())
-        }
-        # Masked text prediction
-        self.mask_decoder = nn.ModuleDict(
-            # {name: CrossAttentionDecoder(self.parts_output_dim[name], text_dim) for name in self.parts_output_dim}
-            {name: CrossAttentionDecoder(d_model=512, vocab_size=self.clip.vocab_size) for name in self.parts_output_dim}
+        time_encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=4*d_model,
+            batch_first=True
         )
-        self.relation_proj_text = nn.Sequential(
-            nn.Linear(self.text_feat_dim, 256),
-            nn.LayerNorm(256),
+        self.spatial_transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.time_transformer = CausalTransformerEncoder(time_encoder_layer, num_layers=num_layers)
+        # args
+        self.args = args
+        self.contrastive_loss = ContrastiveLossWithSTSV2()
+        self.text_proj = nn.Linear(args.text_dim, d_model)
+        self.motion_text_proj = nn.Linear(d_model, d_model)
+
+    def forward(self, parts_feature, text=None):
+        # 部件特征预处理
+        B, T = parts_feature[0].shape[0], parts_feature[0].shape[1]
+        # 时空位置编码注入
+        part_embeds = []
+        for i,  feat in enumerate(parts_feature):
+            # 部件类型编码
+            part_embeds.append(feat + self.part_position.weight[i][None, None, :])
+        global_part_tokens = self.global_part_token.expand(B*T, -1, -1)
+        if self.global_token_mode == 0:
+            global_time_tokens = self.global_time_token.expand(B*7, -1, -1)
+        # 构建时空特征立方体 [B, T, 6, d_model]
+        spatial_cube = torch.stack(part_embeds, dim=2)
+        # spatial_cube = rearrange(spatial_cube, 'b t p d -> (b p) t d')
+        # 构建融合输入 [B*T, 7, d_model]（6个部件+1个全局Token）
+        fused_feat = torch.cat([
+            global_part_tokens,
+            rearrange(spatial_cube, 'b t p d -> (b t) p d', b=B)
+        ], dim=1)
+        # 空间维度交互 (部件间关系)        spatial_cube = spatial_cube + self.time_position[:, :T, :][None, :, None, :]
+        spatial_feat = rearrange(fused_feat, '(b t) p d-> (b t) p d', b=B, p=7)
+        
+        spatial_feat = self.spatial_transformer(spatial_feat)  # [B*T, 7, d]
+        
+        time_feat = rearrange(spatial_feat, '(b t) p d-> (b p) t d', b=B, p=7)
+        if self.global_token_mode==0:
+            time_feat = torch.cat([
+                global_time_tokens,
+                time_feat
+            ], dim=1)
+        time_feat = self.time_transformer(time_feat)  # [B*7, T, d]
+        feature = rearrange(time_feat, '(b p) t d -> b t p d', b=B, p=7)
+        if self.global_token_mode == 0:
+            global_feat = feature[:, 0, 0, :]
+        else:
+            global_feat = feature[:, :, 0, :].mean(dim=1)
+        if text is not None:
+            text_feature, text_id = text
+            text_feature = text_feature.to(parts_feature[0].device).float()
+            text_feature = self.text_proj(text_feature)
+            motion_feature_global = self.motion_text_proj(global_feat)  # [B, d_model]
+            contrastive_loss = self.contrastive_loss(motion_feature_global, text_feature, text_id)
+        else:
+            contrastive_loss = torch.tensor(0.0).to(parts_feature[0].device)
+        
+        return feature, contrastive_loss
+    
+from transformers import BertTokenizer, BertModel
+class LGVQv2(nn.Module):
+    def __init__(self, args,
+                 d_model=256,
+                 nhead=8,
+                 num_layers=4,
+                 global_token_mode = 1,
+                 bert_hidden_dim = 768,
+                 vocab_size = 30522,
+                 ):
+        super().__init__()
+        # 全身特征聚合Token
+        self.global_part_token = nn.Parameter(torch.randn(1, 1, d_model))
+        # 0 采用vit clstoken， 1采用pooling
+        self.global_token_mode = global_token_mode
+        if global_token_mode == 0:
+            self.global_time_token = nn.Parameter(torch.randn(1, 1, d_model))
+        # 增强的位置编码体系
+        self.part_position = nn.Embedding(6, d_model)  # 部件类型编码
+        # 不带结构约束的空间Transformer
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=4*d_model,
+            batch_first=True,
+        )
+        time_encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=4*d_model,
+            batch_first=True
+        )
+        self.spatial_transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.time_transformer = CausalTransformerEncoder(time_encoder_layer, num_layers=num_layers)
+        # args
+        self.args = args
+        self.contrastive_loss = ContrastiveLossWithSTSV2()
+        self.text_proj = nn.Linear(bert_hidden_dim, bert_hidden_dim)
+        
+        # 增强跨模态注意力
+        self.cross_attention = nn.MultiheadAttention(
+            embed_dim=bert_hidden_dim,
+            num_heads=8,
+            batch_first=True
+        )
+        # 运动特征处理模块
+        self.motion_all_proj = nn.Sequential(
+            nn.Linear(args.d_model * 7, bert_hidden_dim),
+            nn.LayerNorm(bert_hidden_dim),
             nn.GELU()
         )
-        self.relation_proj_motion = nn.ModuleDict({
-            name: nn.Sequential(
-                nn.Linear(self.parts_output_dim[name], 256),
-                nn.LayerNorm(256),
-                nn.GELU()
-            ) for name in self.parts_name}
+        
+        self.mlm_head = nn.Sequential(
+            nn.Linear(bert_hidden_dim, bert_hidden_dim * 4),
+            nn.GELU(),
+            nn.LayerNorm(bert_hidden_dim * 4),
+            nn.Linear(bert_hidden_dim * 4, vocab_size)
         )
-        self.gsa_text_proj = nn.ModuleDict({
-            name: nn.Sequential(
-                nn.Linear(self.text_feat_dim, 256),
-                nn.LayerNorm(256),
-                nn.GELU(),
-                nn.Linear(256, self.parts_output_dim[name]))  # 对齐主部位维度
-            for name in self.parts_name
-            }
+        self.temporal_fusion = nn.TransformerEncoder(
+            nn.TransformerEncoderLayer(
+                d_model=bert_hidden_dim,
+                nhead=8,
+                dim_feedforward=3072,
+                batch_first=True),
+            num_layers=2
         )
-        # self.tau = nn.Parameter(torch.tensor(0.07))
-        # Loss weights
-        self.alpha = 0.5  # GSA weight
-        self.beta = 0.3   # MTP weight
-        self.gamma = 0.2  # RAS weight
+        self.bert_model = BertModel.from_pretrained('bert-base-uncased')
+        # self.bert_model.cuda()
+        self.bert_model.eval()  # 冻结BERT参数
+        self.vocab_size = vocab_size
+        self.motion_text_proj = nn.Linear(d_model, bert_hidden_dim)
 
-    def load_checkpoint(self, checkpoint):
-        """加载预训练模型"""
-        param = torch.load(checkpoint)
-        new_param = {}
-        for key, value in param['net'].items():
-            if 'vqvae.' in key:
-                new_key = key.replace('vqvae.', '')
-                new_param[new_key] = value
-        self.load_state_dict(new_param, strict=False)
-
-    def load_clip(self, model_name):
-        model, preprocess = clip.load(model_name)
-        # 冻结所有CLIP参数
-        for param in model.parameters():
-            param.requires_grad = False
-        return model, preprocess
+    def forward(self, parts_feature, text=None, text_mask = None, motion_mask=None):
+        self.bert_model.to(parts_feature[0].device)
+        # 部件特征预处理
+        B, T = parts_feature[0].shape[0], parts_feature[0].shape[1]
+        # 时空位置编码注入
+        part_embeds = []
+        for i,  feat in enumerate(parts_feature):
+            # 部件类型编码
+            part_embeds.append(feat + self.part_position.weight[i][None, None, :])
+        global_part_tokens = self.global_part_token.expand(B*T, -1, -1)
+        if self.global_token_mode == 0:
+            global_time_tokens = self.global_time_token.expand(B*7, -1, -1)
+        # 构建时空特征立方体 [B, T, 6, d_model]
+        spatial_cube = torch.stack(part_embeds, dim=2)
+        # 构建融合输入 [B*T, 7, d_model]（6个部件+1个全局Token）
+        fused_feat = torch.cat([
+            global_part_tokens,
+            rearrange(spatial_cube, 'b t p d -> (b t) p d', b=B)
+        ], dim=1)
+        # 空间维度交互 (部件间关系)        spatial_cube = spatial_cube + self.time_position[:, :T, :][None, :, None, :]
+        spatial_feat = rearrange(fused_feat, '(b t) p d-> (b t) p d', b=B, p=7)
+        
+        spatial_feat = self.spatial_transformer(spatial_feat)  # [B*T, 7, d]
+        
+        time_feat = rearrange(spatial_feat, '(b t) p d-> (b p) t d', b=B, p=7)
+        if self.global_token_mode==0:
+            time_feat = torch.cat([
+                global_time_tokens,
+                time_feat
+            ], dim=1)
+        if motion_mask is not None:
+            motion_mask = motion_mask.to(time_feat.device).bool()
+            time_key_padding_mask = motion_mask.repeat_interleave(7, dim=0)
+            time_feat = self.time_transformer(time_feat, src_key_padding_mask=~time_key_padding_mask)  # [T, B*7, d]
+        else:
+            time_feat = self.time_transformer(time_feat)
+        feature = rearrange(time_feat, '(b p) t d -> b t p d', b=B, p=7)
+        if self.global_token_mode == 0:
+            global_feat = feature[:, 0, 0, :]
+        else:
+            global_feat = feature[:, :, 0, :].mean(dim=1)
+        
+        if text is not None:
+            text_feature, text_id = text
+            if text_mask is not None:
+                # text_feature = text_mask['bert_features']
+                input_ids = text_mask['input_ids'].to(parts_feature[0].device)  # [B, seq_len]
+                labels = text_mask['labels'].to(parts_feature[0].device).float()
+                attention_mask = text_mask['attention_mask'].to(parts_feature[0].device).bool()
+                # text_feature_pooler = text_mask['bert_features_pool'].to(parts_feature[0].device).float()
+                with torch.no_grad():
+                    bert_outputs = self.bert_model(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask
+                    )
+                    text_feature = bert_outputs.last_hidden_state.to(parts_feature[0].device).float()
+                    text_feature_pooler = text_mask['feature'].to(parts_feature[0].device).float()
+            text_feature = text_feature.to(parts_feature[0].device).float()
+            # text_feature = self.text_proj(text_feature)
+            motion_feature_global = self.motion_text_proj(global_feat)  # [B, d_model]
+            motion_query = self.motion_all_proj(rearrange(feature, 'b t p d -> b t (p d)'))
+            # 跨模态注意力
+            if motion_mask is not None:
+                attn_output, _ = self.cross_attention(
+                    query=text_feature,
+                    key=motion_query,
+                    value=motion_query,
+                    key_padding_mask=~motion_mask
+                )  # [bs, seq_text, bert_hidden]
+            else:
+                attn_output, _ = self.cross_attention(
+                    query=text_feature,
+                    key=motion_query,
+                    value=motion_query
+                )
+            fused_features = self.temporal_fusion(
+                attn_output,
+                src_key_padding_mask=~attention_mask
+            )  # [bs, seq_text, bert_hidden]
+            logits = self.mlm_head(fused_features)  # [bs, seq_text, vocab_size]
+            
+            # 计算掩码损失
+            loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
+            active_loss = (labels != -100).view(-1)
+            active_logits = logits.view(-1, self.vocab_size)[active_loss]
+            active_labels = labels.view(-1)[active_loss]
+            
+            mlm_loss = loss_fct(active_logits, active_labels.long())
+            text_feature_pooler = self.text_proj(text_feature_pooler)
+            contrastive_loss = self.contrastive_loss(motion_feature_global, text_feature_pooler, text_id)
+        else:
+            contrastive_loss = torch.tensor(0.0).to(parts_feature[0].device)
+        
+        return feature, [contrastive_loss, mlm_loss]
     
-    def create_positional_encoding(self, dim, length, idx):
-        """生成位置编码"""
-        position = torch.arange(length).unsqueeze(1) + idx  # 为每个部位生成不同的编码
-        div_term = torch.exp(torch.arange(0, dim, 2) * -(torch.log(torch.tensor(10000.0)) / dim))
-        pe = torch.zeros(length, 1, dim)
-        pe[:, 0, 0::2] = torch.sin(position * div_term)
-        pe[:, 0, 1::2] = torch.cos(position * div_term)
-        return nn.Parameter(pe, requires_grad=False)
-
-    
-    def _get_text_features(self, text):
-        """获取文本特征"""
-        text_tokens = self.clip.tokenize(text)
-        # text_tokens = self.tokenizer(text, return_tensors='pt', padding=True, truncation=True)
-        # text_tokens = {k: v.to(self.clip.device) for k, v in text_tokens.items()}
-        # text_features = self.clip.get_text_features(**text_tokens)
-        text_features_allseq = self.clip.encode_text_allseq(text_tokens)
-        feature = text_features_allseq[torch.arange(text_features_allseq.shape[0]), text_tokens.argmax(dim=-1)] @ self.clip.text_projection
-        return text_tokens, text_features_allseq.detach(), feature
-    
-    def forward(self, parts, text_tokens, text_feature, text_feature_all):
-        """
-        分身体前向传播
-        :param parts: 身体部位特征列表 [Root, R_Leg, ...]
-        :param text: 文本描述列表
-        :return: 各模块输出
-        """
-        # # 文本特征处理
-        # # text_tokens, text_feat = self._get_text_features(text)  # [B, text_dim]
-        # if isinstance(text, tuple):
-        #     # text = text[0]
-        #     text = [name for id, name in enumerate(text)]
-        # if isinstance(text, str):
-        #     text = [text]
-        # if isinstance(text, list):
-        #     text_tokens, text_feat = self._get_text_features(text)
-        # else:
-        #     text_feat = text
-        text_feature_all = text_feature_all.float()
-        
-        text_feat = text_feature.float()
-        B = text_feat.size(0)
-        
-        # 存储各部位输出
-        outputs = {
-            'recon_parts': [],
-            'vq_losses': [],
-            'gsa_features': [],
-            'mtp_logits': [],
-            'relation_sims': [],
-            'perplexity': []
-        }
-        
-        # 遍历每个身体部位
-        for i, name in enumerate(self.parts_name):
-            # 原始VQVAE处理流程
-            x_part = parts[i]
-            x_in = self.preprocess(x_part)
-            
-            # 编码
-            encoder = getattr(self, f'enc_{name}')
-            z_e = encoder(x_in)  # [B, C, T]
-            
-            # 量化
-            quantizer = getattr(self, f'quantizer_{name}')
-            z_q, vq_loss, perplexity = quantizer(z_e)
-            
-            # 解码
-            decoder = getattr(self, f'dec_{name}')
-            recon_part = self.postprocess(decoder(z_q))
-            
-            outputs['recon_parts'].append(recon_part)
-            outputs['vq_losses'].append(vq_loss)
-            outputs['perplexity'].append(perplexity)
-            # 语言引导模块 -------------------------------------------------
-            # 添加CLS token并处理ViT
-            cls_token = self.cls_token[name].expand(B, -1, -1).to(x_in.device)  # [B, 1, C]
-            z_q_cls = torch.cat([cls_token, z_q.permute(0,2,1)], dim=1)  # [B, T+1, C]
-            z_vt = self.vit[name](z_q_cls)  # [B, T+1, C]
-            
-            # 全局语义对齐特征
-            e_CLS = z_vt[:, 0]  # [B, C]
-            e_TEXT = self.gsa_text_proj[name](text_feat)
-            outputs['gsa_features'].append((e_CLS, e_TEXT))
-            
-            # 掩码文本预测
-            masked_feat = self._mask_text_feature(text_tokens)
-            pred_logits = self.mask_decoder[name](z_vt, masked_feat)
-            outputs['mtp_logits'].append((pred_logits.squeeze(1), text_feat))
-            
-            # 关系对齐
-            word_emb = self.relation_proj_text(text_feature_all)  # [B, 256]
-            code_emb = self.relation_proj_motion[name](z_vt[:, 1:].mean(dim=1))  # [B, 256]
-            sim_matrix = F.cosine_similarity(word_emb.unsqueeze(1), code_emb.unsqueeze(0), dim=-1)
-            outputs['relation_sims'].append(sim_matrix)
-        
-        return outputs
-
-    def calculate_loss(self, outputs, text_ids):
-        """计算多任务损失"""
-        # 基础VQ损失
-        # vq_loss = torch.stack(outputs['vq_losses']).mean()
-        # perplexity = torch.stack(outputs['perplexity']).mean()
-        # 全局语义对齐损失 (对比学习)
-        gsa_loss = 0
-        B = len(outputs['gsa_features'])
-        e_TEXT_norm_list = []
-        for e_CLS, e_TEXT in outputs['gsa_features']:
-            e_TEXT_norm = F.normalize(e_TEXT, p=2, dim=1)
-            e_TEXT_norm_list.append(e_TEXT_norm)
-            
-        # 构建text_id到样本索引的映射
-        from collections import defaultdict
-        id_to_indices = defaultdict(list)
-        for idx, tid in enumerate(text_ids):
-            id_to_indices[tid].append(idx)
-        
-        for i in range(B):
-            e_CLS_i, e_TEXT_i = outputs['gsa_features'][i]
-            e_CLS_norm_i = F.normalize(e_CLS_i, p=2, dim=1)
-            
-            # 计算当前样本与其他所有样本的相似度矩阵行
-            similarity_matrix_i = torch.matmul(
-                e_CLS_norm_i,
-                e_TEXT_norm_list[i].t()  # [B, D] x [B, D] => [B, B]
-            )
-            probs_i = torch.sigmoid(similarity_matrix_i)
-            log_probs_i = -torch.log(probs_i + 1e-12)  # [B, B]
-            
-            current_tid = text_ids[i]
-            same_class_indices = id_to_indices[current_tid]
-            
-            # 定义正样本：除自己外的同类样本
-            pos_indices = [j for j in same_class_indices if j != i]
-            # 定义负样本：不同类的样本
-            neg_indices = [j for j in range(B) if j not in same_class_indices]
-            
-            # 计算正样本平均log_prob
-            avg_pos = 0.0
-            if pos_indices:
-                avg_pos = log_probs_i[i, pos_indices].mean()
-            
-            # 计算负样本平均log_prob
-            avg_neg = 0.0
-            if neg_indices:
-                avg_neg = log_probs_i[i, neg_indices].mean()
-            
-            # 损失项：正样本对数概率 - 负样本对数概率(越高越好)
-            loss_i = avg_pos - avg_neg
-            gsa_loss -= loss_i
-        
-        # gsa_loss /= B
-        # for e_CLS, e_TEXT in outputs['gsa_features']:
-        #     # # 添加温度缩放
-        #     # logits = torch.matmul(
-        #     #     F.normalize(e_CLS, p=2, dim=1),
-        #     #     F.normalize(e_TEXT, p=2, dim=1).t()
-        #     # ) #/ self.tau.clamp(min=1e-4)
-        #     # labels = torch.arange(logits.size(0), device=logits.device)
-        #     # gsa_loss += F.cross_entropy(logits, labels)
-        #     # 添加温度缩放和特征归一化
-        #     e_CLS_norm = F.normalize(e_CLS, p=2, dim=1)  # [B, D]
-        #     e_TEXT_norm = F.normalize(e_TEXT, p=2, dim=1)  # [B, text_dim]
-            
-        #     # 计算相似度矩阵
-        #     similarity_matrix = torch.matmul(e_CLS_norm, e_TEXT_norm.t())  # [B, B]
-            
-        #     # 应用温度缩放
-        #     # scaled_similarity = similarity_matrix / self.tau.clamp(min=1e-4, max=1.0)  # [B, B]
-            
-        #     # 通过sigmoid转换为概率
-        #     probs = torch.sigmoid(similarity_matrix)  # [B, B]
-            
-        #     # InfoNCE损失计算
-        #     # 正样本是自身位置，负样本是其他所有位置
-        #     log_probs = -torch.log(probs + 1e-12)  # 防止log(0)
-            
-        #     # 每个样本的损失：取自己位置的正样本log_prob，其他为负样本
-        #     loss_i = log_probs[range(len(probs)), range(len(probs))] - log_probs.sum(dim=1)
-        #     gsa_loss -= loss_i.mean()
-            
-        
-        # 掩码文本预测损失 (特征回归)
-        mtp_loss = 0
-        for pred, target in outputs['mtp_logits']:
-            mtp_loss += F.mse_loss(pred, target.detach())
-        
-        # 关系对齐损失
-        ras_loss = 0
-        for sim_matrix in outputs['relation_sims']:
-            ras_matrix = torch.eye(sim_matrix.size(0), device=sim_matrix.device)
-            ras_loss += F.mse_loss(sim_matrix, ras_matrix)
-        
-        # 总损失
-        total_loss = (self.alpha * gsa_loss +
-                     self.beta * mtp_loss +
-                     self.gamma * ras_loss)
-        
-        return {
-            'total_loss': total_loss,
-            # 'vq_loss': vq_loss,
-            # 'perplexity': perplexity,
-            'gsa_loss': gsa_loss,
-            'mtp_loss': mtp_loss,
-            'ras_loss': ras_loss
-        }
-
-    # # Helper functions
-    # def quantize(self, z_e):
-    #     # Vector quantization logic
-    #     distances = torch.cdist(z_e, self.codebook.weight)
-    #     indices = torch.argmin(distances, dim=-1)
-    #     z_q = self.codebook(indices)
-    #     return z_q, indices
-
-    def _mask_text_feature(self, text_tokens, mask_ratio=0.15):
-        """生成掩码文本特征"""
-        # masks = []
-        # B, L = text_tokens.size()
-        masks = torch.ones_like(text_tokens, dtype=torch.bool)  # 初始化为全True的掩码
-        for i in range(text_tokens.shape[0]):
-            text_token = text_tokens[i][:torch.argmax(text_tokens[i], dim=-1)]
-            num_mask = int(mask_ratio * (text_token.shape[0]-2))
-            mask_idx = torch.randperm(text_token.shape[0]-2)[:num_mask] + 1
-            # masks.append(mask_idx.clone())
-            masks[i, mask_idx] = False  # 将选中的位置设置为False
-
-        masked_text_tokens = text_tokens * masks  # 应用掩码
-        return masked_text_tokens  
-
-def plot_tsne(e_CLS, e_TEXT):
-    import matplotlib.pyplot as plt
-    from sklearn.manifold import TSNE
-    # import numpy as np
-    tsne = TSNE(n_components=2)
-    vis_feat = tsne.fit_transform(torch.cat([e_CLS.cpu().detach(), e_TEXT.cpu().detach()]))
-    labels = torch.cat([torch.ones(e_CLS.cpu().detach().size(0)), torch.ones(e_TEXT.cpu().detach().size(0))*2])
-    plt.scatter(vis_feat[:,0], vis_feat[:,1], c=labels)
-    plt.savefig("CLS_TEXT2.png")
-    
-class MotionViT(nn.Module):
-    # 1D Vision Transformer for processing motion codes
-    def __init__(self, dim, num_layers, num_heads):
+class LGVQv3(nn.Module):
+    def __init__(self, args,
+                 d_model=256,
+                 nhead=8,
+                 num_layers=4,
+                 global_token_mode = 1,
+                 bert_hidden_dim = 768,
+                 vocab_size = 30522,
+                 ):
         super().__init__()
-        self.layers = nn.ModuleList([
-            nn.TransformerEncoderLayer(dim, num_heads, dim*4)
-            for _ in range(num_layers)
+        # 全身特征聚合Token
+        self.global_part_token = nn.Parameter(torch.randn(1, 1, d_model))
+        # 0 采用vit clstoken， 1采用pooling
+        self.global_token_mode = global_token_mode
+        if global_token_mode == 0:
+            self.global_time_token = nn.Parameter(torch.randn(1, 1, d_model))
+        # 增强的位置编码体系
+        self.part_position = nn.Embedding(6, d_model)  # 部件类型编码
+        # 不带结构约束的空间Transformer
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=4*d_model,
+            batch_first=True,
+        )
+        time_encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=4*d_model,
+            batch_first=True
+        )
+        self.spatial_transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.time_transformer = CausalTransformerEncoder(time_encoder_layer, num_layers=num_layers)
+        # args
+        self.args = args
+        self.contrastive_loss = ContrastiveLossWithSTSV2()
+        self.text_proj = nn.Linear(bert_hidden_dim, bert_hidden_dim)
+        self.query_proj = nn.Linear(bert_hidden_dim, bert_hidden_dim)
+        # 增强跨模态注意力
+        self.cross_attn_layers = nn.ModuleList([
+            nn.TransformerDecoderLayer(
+                d_model=bert_hidden_dim,
+                nhead=8,
+                dim_feedforward=4*bert_hidden_dim,
+                batch_first=True
+            ) for _ in range(3)
         ])
-        
-    def forward(self, x):
-        for layer in self.layers:
-            x = layer(x)
-        return x
-
-# class CrossModalCLS(nn.Module):
-#     def __init__(self, part_dim, text_dim, num_heads=4):
-#         super().__init__()
-#         # 跨模态注意力机制
-#         self.cross_attn = nn.MultiheadAttention(
-#             embed_dim=part_dim,
-#             kdim=text_dim,
-#             vdim=text_dim,
-#             num_heads=num_heads,
-#             batch_first=True
-#         )
-#         # 动态生成层
-#         self.generator = nn.Sequential(
-#             nn.Linear(part_dim, 4*part_dim),
-#             nn.LayerNorm(4*part_dim),
-#             nn.GELU(),
-#             nn.Linear(4*part_dim, part_dim)
-#         )
-        
-#     def forward(self, part_feat, text_feat):
-#         """
-#         part_feat: [B, T, D] 部位运动特征
-#         text_feat: [B, S, text_dim] 文本特征序列
-#         """
-#         B = part_feat.size(0)
-        
-#         # 初始化查询向量
-#         query = torch.mean(part_feat, dim=1, keepdim=True)  # [B, 1, D]
-        
-#         # 跨模态注意力
-#         cls_token, _ = self.cross_attn(
-#             query=query,
-#             key=text_feat,
-#             value=text_feat
-#         )  # [B, 1, D]
-        
-#         # 动态增强
-#         cls_token = self.generator(cls_token)
-        
-#         return torch.cat([cls_token, part_feat], dim=1)
-
-class CrossAttentionDecoder(torch.nn.Module):
-    def __init__(self, d_model=512, nhead=8, vocab_size=49408):
-        super().__init__()
-        self.cross_attn = torch.nn.MultiheadAttention(d_model, nhead, batch_first=True)
-        self.ffn = torch.nn.Linear(d_model, vocab_size)
-        
-    def forward(self, visual_codes, text_embeddings):
-        # visual_codes: [B, L_v, d_z], text_embeddings: [B, L_t, d_t]
-        attn_output, _ = self.cross_attn(
-            query=text_embeddings, 
-            key=visual_codes,
-            value=visual_codes
+        # 运动特征处理模块
+        self.motion_all_proj = nn.Sequential(
+            nn.Linear(args.d_model * 7, bert_hidden_dim),
+            nn.LayerNorm(bert_hidden_dim),
+            nn.GELU()
         )
-        logits = self.ffn(attn_output)
-        return logits  # [B, L_t, vocab_size]
+        
+        self.mlm_head = nn.Sequential(
+            nn.Linear(bert_hidden_dim, bert_hidden_dim * 4),
+            nn.GELU(),
+            nn.LayerNorm(bert_hidden_dim * 4),
+            nn.Linear(bert_hidden_dim * 4, vocab_size)
+        )
+        self.bert_model = BertModel.from_pretrained('bert-base-uncased')
+        # self.bert_model.cuda()
+        self.bert_model.eval()  # 冻结BERT参数
+        self.vocab_size = vocab_size
+        self.motion_text_proj = nn.Linear(d_model, bert_hidden_dim)
 
-# class CrossAttentionDecoder(nn.Module):
-#     def __init__(self, motion_dim, text_dim=512):  # CLIP默认文本维度
-#         super().__init__()
+    # def _generate_cross_mask(self, text_mask: torch.Tensor, motion_mask: torch.Tensor) -> torch.Tensor:
+    #     """生成联合时空注意力掩码"""
+    #     if text_mask is None or motion_mask is None:
+    #         return None
         
-#         # 维度对齐投影层
-#         self.motion_proj = nn.Linear(motion_dim, text_dim)
+    #     # 文本维度扩展 [B, seq_text] -> [B, seq_text, 1]
+    #     text_pad = ~text_mask.unsqueeze(-1)
+    #     # 运动维度扩展 [B, seq_motion] -> [B, 1, seq_motion]
+    #     motion_pad = ~motion_mask.unsqueeze(1)
         
-#         # 跨注意力机制（使用文本维度）
-#         self.cross_attn = nn.MultiheadAttention(
-#             embed_dim=text_dim,
-#             num_heads=8,
-#             batch_first=True
-#         )
+    #     # 联合掩码：任一位置为pad则屏蔽 [B, seq_text, seq_motion]
+    #     combined_mask = text_pad | motion_pad
         
-#         # 前馈网络
-#         self.ffn = nn.Sequential(
-#             nn.Linear(text_dim, 4*text_dim),
-#             nn.GELU(),
-#             nn.Linear(4*text_dim, text_dim)
-#         )
-        
-#         # 输出投影层（适配CLIP特征空间）
-#         self.proj = nn.Linear(text_dim, text_dim)  # 保持维度一致
+    #     # 适配多头注意力 [B*num_heads, seq_text, seq_motion]
+    #     return combined_mask.repeat_interleave(8, dim=0)
 
-#     def forward(self, motion_feat, masked_text_feat):
-#         """
-#         motion_feat: [B, T+1, motion_dim] 运动特征（含CLS token）
-#         masked_text_feat: [B, S, text_dim] 被掩码的CLIP文本特征
-#         """
-#         # 运动特征维度投影
-#         projected_motion = self.motion_proj(motion_feat)  # [B, T+1, text_dim]
+    def forward(self, parts_feature, text=None, text_mask = None, motion_mask=None):
+        self.bert_model.to(parts_feature[0].device)
+        # 部件特征预处理
+        B, T = parts_feature[0].shape[0], parts_feature[0].shape[1]
+        # 时空位置编码注入
+        part_embeds = []
+        for i,  feat in enumerate(parts_feature):
+            # 部件类型编码
+            part_embeds.append(feat + self.part_position.weight[i][None, None, :])
+        global_part_tokens = self.global_part_token.expand(B*T, -1, -1)
+        if self.global_token_mode == 0:
+            global_time_tokens = self.global_time_token.expand(B*7, -1, -1)
+        # 构建时空特征立方体 [B, T, 6, d_model]
+        spatial_cube = torch.stack(part_embeds, dim=2)
+        # 构建融合输入 [B*T, 7, d_model]（6个部件+1个全局Token）
+        fused_feat = torch.cat([
+            global_part_tokens,
+            rearrange(spatial_cube, 'b t p d -> (b t) p d', b=B)
+        ], dim=1)
+        # 空间维度交互 (部件间关系)        spatial_cube = spatial_cube + self.time_position[:, :T, :][None, :, None, :]
+        spatial_feat = rearrange(fused_feat, '(b t) p d-> (b t) p d', b=B, p=7)
         
-#         # 跨注意力计算（Query: 文本， Key/Value: 运动）
-#         attn_out, _ = self.cross_attn(
-#             query=masked_text_feat,
-#             key=projected_motion,
-#             value=projected_motion
-#         )
+        spatial_feat = self.spatial_transformer(spatial_feat)  # [B*T, 7, d]
         
-#         # 特征增强
-#         ffn_out = self.ffn(attn_out)
+        time_feat = rearrange(spatial_feat, '(b t) p d-> (b p) t d', b=B, p=7)
+        if self.global_token_mode==0:
+            time_feat = torch.cat([
+                global_time_tokens,
+                time_feat
+            ], dim=1)
+        if motion_mask is not None:
+            motion_mask = motion_mask.to(time_feat.device).bool()
+            time_key_padding_mask = motion_mask.repeat_interleave(7, dim=0)
+            time_feat = self.time_transformer(time_feat, src_key_padding_mask=~time_key_padding_mask)  # [T, B*7, d]
+        else:
+            time_feat = self.time_transformer(time_feat)
+        feature = rearrange(time_feat, '(b p) t d -> b t p d', b=B, p=7)
+        if self.global_token_mode == 0:
+            global_feat = feature[:, 0, 0, :]
+        else:
+            global_feat = feature[:, :, 0, :].mean(dim=1)
         
-#         # 最终投影（保持与CLIP特征相同维度）
-#         return self.proj(ffn_out)  # [B, S, text_dim]
+        if text is not None:
+            text_feature, text_id = text
+            if text_mask is not None:
+                # text_feature = text_mask['bert_features']
+                input_ids = text_mask['input_ids'].to(parts_feature[0].device)  # [B, seq_len]
+                labels = text_mask['labels'].to(parts_feature[0].device).float()
+                attention_mask = text_mask['attention_mask'].to(parts_feature[0].device).bool()
+                # text_feature_pooler = text_mask['bert_features_pool'].to(parts_feature[0].device).float()
+                with torch.no_grad():
+                    bert_outputs = self.bert_model(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask
+                    )
+                    text_feature = bert_outputs.last_hidden_state.to(parts_feature[0].device).float()
+                    text_feature_pooler = text_mask['feature'].to(parts_feature[0].device).float()
+            text_feature = text_feature.to(parts_feature[0].device).float()
+            text_query = self.query_proj(text_feature)
+            motion_feature_global = self.motion_text_proj(global_feat)  # [B, d_model]
+            motion_query = self.motion_all_proj(rearrange(feature, 'b t p d -> b t (p d)'))
+            # attn_mask = self._generate_cross_mask(attention_mask, motion_mask)
+            # 跨模态注意力
+            for layer in self.cross_attn_layers:
+                text_query = layer(
+                    tgt=text_query,
+                    memory=motion_query,
+                    tgt_mask=None,
+                    memory_mask=None,
+                    memory_key_padding_mask=~motion_mask,
+                    tgt_key_padding_mask=~attention_mask,
+                )
+                
+            logits = self.mlm_head(text_query)  # [bs, seq_text, vocab_size]
+            
+            # 计算掩码损失
+            loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
+            active_loss = (labels != -100).view(-1)
+            active_logits = logits.view(-1, self.vocab_size)[active_loss]
+            active_labels = labels.view(-1)[active_loss]
+            
+            mlm_loss = loss_fct(active_logits, active_labels.long())
+            text_feature_pooler = self.text_proj(text_feature_pooler)
+            contrastive_loss = self.contrastive_loss(motion_feature_global, text_feature_pooler, text_id)
+        else:
+            contrastive_loss = torch.tensor(0.0).to(parts_feature[0].device)
+        
+        return feature, [contrastive_loss, mlm_loss]
     
+class Dualsem_encoder(nn.Module):
+    def __init__(self, args, num_layers=4, d_model=256, nhead=8, bert_hidden_dim=768, vocab_size=30522):
+        super().__init__()
+        self.args = args
+        self.parts_name = ['Root', 'R_Leg', 'L_Leg', 'Backbone', 'R_Arm', 'L_Arm']
+        self.motion_text_proj = nn.Linear(d_model, args.text_dim)
+        self.text_proj = nn.Linear(args.text_dim, args.text_dim)
+        time_encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=4*d_model,
+            batch_first=True
+        )
+        self.time_transformer = CausalTransformerEncoder(time_encoder_layer, num_layers=num_layers)
+        self.contrastive_loss = ContrastiveLossWithSTSV2()
+        self.text_proj = nn.Linear(bert_hidden_dim, bert_hidden_dim)
+        
+        # 增强跨模态注意力
+        self.cross_attention = nn.MultiheadAttention(
+            embed_dim=bert_hidden_dim,
+            num_heads=8,
+            batch_first=True
+        )
+        # 运动特征处理模块
+        self.motion_all_proj = nn.Sequential(
+            nn.Linear(args.d_model * 7, bert_hidden_dim),
+            nn.LayerNorm(bert_hidden_dim),
+            nn.GELU()
+        )
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=4*d_model,
+            batch_first=True,
+        )
+        self.spatial_transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.mlm_head = nn.Sequential(
+            nn.Linear(bert_hidden_dim, bert_hidden_dim * 4),
+            nn.GELU(),
+            nn.LayerNorm(bert_hidden_dim * 4),
+            nn.Linear(bert_hidden_dim * 4, vocab_size)
+        )
+        self.temporal_fusion = nn.TransformerEncoder(
+            nn.TransformerEncoderLayer(
+                d_model=bert_hidden_dim,
+                nhead=8,
+                dim_feedforward=3072,
+                batch_first=True),
+            num_layers=2
+        )
+        self.bert_model = BertModel.from_pretrained('bert-base-uncased')
+        self.bert_model.eval()  # 冻结BERT参数
+        self.vocab_size = vocab_size
+        self.motion_text_proj = nn.Linear(d_model, bert_hidden_dim)
+        self.sem_quantizer = QuantizeEMAReset(args.vqvae_sem_nb, d_model, args)
+        for idx, name in enumerate(self.parts_name):
+            quantizer = QuantizeEMAReset(args.vqvae_arch_cfg['parts_code_nb'][name], d_model, args)
+            setattr(self, f'quantizer_{name}', quantizer)
+        
+    def forward(self, parts_feature, text=None, text_mask = None, motion_mask=None):
+        self.bert_model.to(parts_feature[0].device)
+        # 部件特征预处理
+        P, B, T = parts_feature.shape[0], parts_feature.shape[1], parts_feature.shape[2]
+        # 构建时空特征立方体 [B, T, 6, d_model]
+        # time_feat = torch.cat(parts_feature, dim=0)
+        # time_feat = rearrange(parts_feature, '(b p) t d-> (b p) t d', b=B, p=7)
+        sptial_feat = rearrange(parts_feature, 'p b t d-> (b t) p d')
+        sptial_feat = self.spatial_transformer(sptial_feat)
+        time_feat = rearrange(sptial_feat, '(b t) p d-> (b p) t d', b=B)
+        if motion_mask is not None:
+            motion_mask = motion_mask.to(time_feat.device).bool()
+            time_key_padding_mask = motion_mask.repeat_interleave(7, dim=0)
+            time_feat = self.time_transformer(time_feat, src_key_padding_mask=~time_key_padding_mask)
+        else:
+            time_feat = self.time_transformer(time_feat)
+        feature = rearrange(time_feat, '(b p) t d -> p b t d', b=B, p=7)
+        # quantized
+        x_quantized_sem, loss_sem, perplexity_sem = self.sem_quantizer(rearrange(feature[0], 'b t d -> b d t'))
+        x_quantized_list = [x_quantized_sem.permute(0,2,1)]
+        loss_list = [loss_sem]
+        perplexity_list = [perplexity_sem]
+        for idx, name in enumerate(self.parts_name):
+            quantizer = getattr(self, f'quantizer_{name}')
+            x_quantized, loss, perplexity = quantizer(rearrange(feature[idx+1], 'b t d -> b d t'))
+            x_quantized_list.append(x_quantized.permute(0,2,1))
+            loss_list.append(loss)
+            perplexity_list.append(perplexity)
+            
+        global_feat = x_quantized_sem.permute(0,2,1).mean(dim=1)
+        feature_quantized = torch.cat(x_quantized_list, dim=2)
+        if text is not None:
+            text_feature, text_id = text
+            if text_mask is not None:
+                # text_feature = text_mask['bert_features']
+                input_ids = text_mask['input_ids'].to(parts_feature[0].device)  # [B, seq_len]
+                labels = text_mask['labels'].to(parts_feature[0].device).float()
+                attention_mask = text_mask['attention_mask'].to(parts_feature[0].device).bool()
+                # text_feature_pooler = text_mask['bert_features_pool'].to(parts_feature[0].device).float()
+                with torch.no_grad():
+                    bert_outputs = self.bert_model(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask
+                    )
+                    text_feature = bert_outputs.last_hidden_state.to(parts_feature[0].device).float()
+                    text_feature_pooler = text_mask['feature'].to(parts_feature[0].device).float()
+            text_feature = text_feature.to(parts_feature[0].device).float()
+            motion_feature_global = self.motion_text_proj(global_feat)  # [B, d_model]
+            motion_query = self.motion_all_proj(feature_quantized)
+            # 跨模态注意力
+            if motion_mask is not None:
+                attn_output, _ = self.cross_attention(
+                    query=text_feature,
+                    key=motion_query,
+                    value=motion_query,
+                    key_padding_mask=~motion_mask
+                )  # [bs, seq_text, bert_hidden]
+            else:
+                attn_output, _ = self.cross_attention(
+                    query=text_feature,
+                    key=motion_query,
+                    value=motion_query
+                )
+            fused_features = self.temporal_fusion(
+                attn_output,
+                src_key_padding_mask=~attention_mask
+            )  # [bs, seq_text, bert_hidden]
+            logits = self.mlm_head(fused_features)  # [bs, seq_text, vocab_size]
+            
+            # 计算掩码损失
+            loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
+            active_loss = (labels != -100).view(-1)
+            active_logits = logits.view(-1, self.vocab_size)[active_loss]
+            active_labels = labels.view(-1)[active_loss]
+            
+            mlm_loss = loss_fct(active_logits, active_labels.long())
+            text_feature_pooler = self.text_proj(text_feature_pooler)
+            contrastive_loss = self.contrastive_loss(motion_feature_global, text_feature_pooler, text_id)
+        else:
+            contrastive_loss = torch.tensor(0.0).to(parts_feature[0].device)
+        
+        return feature_quantized, [contrastive_loss, mlm_loss]

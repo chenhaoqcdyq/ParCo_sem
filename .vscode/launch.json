@@ -76,59 +76,59 @@
   //     }
   //   }
   // ]
-  "version": "0.2.0",
-  "configurations": [
-    {
-      "name": "Python 调试程序: 包含参数的当前文件",
-      "type": "debugpy",
-      "request": "launch",
-      // "program": "train_ParCo_rvq_eval.py",
-      "program": "train_ParCo_rvq_sem.py",
-      "console": "integratedTerminal",
-      "args": [
-        "--out-dir=output",
-        "--exp-name=train_ParCo_rvq_sem",
-        "--dataname=t2m",
-        "--batch-size=32",
-        "--print-iter=10",
-        "--lr=2e-4",
-        "--total-iter=300000",
-        "--lr-scheduler=200000",
-        "--vqvae-cfg=default",
-        "--down-t=2",
-        "--depth=3",
-        "--dilation-growth-rate=3",
-        "--vq-act=relu",
-        "--quantizer=ema_reset",
-        "--loss-vel=0.5",
-        "--recons-loss=l1_smooth",
-        "--vision=22",
-        // "--decoder_vision=1",
-        // "--num_quantizers=1",
-        "--causal=True",
-        // "--position=1",
-        "--num-layers=2",
-        // "--numdec-layers=3",
-        "--d_model=256",
-        "--with_attn=True",
-        // "--with_global=0",
-        // "--text_dim=768",
-        "--resume-pth=output/00555-t2m-v6_512/VQVAE-v6_512-t2m-default/net_best_fid.pth",
-        "--lgvq=1",
-        // "--with_global=0"
-        // "--eval-iter=10",
-        // "--warm-up-iter=10"
-        // export CUDA_VISIBLE_DEVICES=0 && python train_ParCo_rvq_sem.py --out-dir=output --exp-name=v21 --dataname=t2m --batch-size=64 --print-iter=200 --lr=5e-5 --total-iter=300000 --lr-scheduler=200000 --vqvae-cfg=default --down-t=2 --depth=3 --dilation-growth-rate=3 --vq-act=relu --quantizer=ema_reset --loss-vel=0.5 --recons-loss=l1_smooth --vision=21 --num-layers=2 --causal=False
-      ],
-      "justMyCode": false,
-      "env": {
-        "PYTHONPATH": "${workspaceFolder}/..:${env:PYTHONPATH}",
-        "TORCH_DISTRIBUTED_DEBUG": "INFO",
-        "CUDA_VISIBLE_DEVICES": "1",
-        "TOKENIZERS_PARALLELISM": "false"
-      }
-    }
-  ]
+  // "version": "0.2.0",
+  // "configurations": [
+  //   {
+  //     "name": "Python 调试程序: 包含参数的当前文件",
+  //     "type": "debugpy",
+  //     "request": "launch",
+  //     // "program": "train_ParCo_rvq_eval.py",
+  //     "program": "train_ParCo_rvq_sem.py",
+  //     "console": "integratedTerminal",
+  //     "args": [
+  //       "--out-dir=output",
+  //       "--exp-name=train_ParCo_rvq_sem",
+  //       "--dataname=t2m",
+  //       "--batch-size=32",
+  //       "--print-iter=10",
+  //       "--lr=2e-4",
+  //       "--total-iter=300000",
+  //       "--lr-scheduler=200000",
+  //       "--vqvae-cfg=default",
+  //       "--down-t=2",
+  //       "--depth=3",
+  //       "--dilation-growth-rate=3",
+  //       "--vq-act=relu",
+  //       "--quantizer=ema_reset",
+  //       "--loss-vel=0.5",
+  //       "--recons-loss=l1_smooth",
+  //       "--vision=24",
+  //       // "--decoder_vision=1",
+  //       // "--num_quantizers=1",
+  //       "--causal=True",
+  //       // "--position=1",
+  //       "--num-layers=2",
+  //       // "--numdec-layers=3",
+  //       "--d_model=256",
+  //       "--with_attn=True",
+  //       // "--with_global=0",
+  //       // "--text_dim=768",
+  //       "--resume-pth=output/00707-t2m-v21/VQVAE-v21-t2m-default/net_last.pth",
+  //       "--lgvq=1",
+  //       // "--with_global=0"
+  //       // "--eval-iter=10",
+  //       // "--warm-up-iter=10"
+  //       // export CUDA_VISIBLE_DEVICES=0 && python train_ParCo_rvq_sem.py --out-dir=output --exp-name=v21 --dataname=t2m --batch-size=64 --print-iter=200 --lr=5e-5 --total-iter=300000 --lr-scheduler=200000 --vqvae-cfg=default --down-t=2 --depth=3 --dilation-growth-rate=3 --vq-act=relu --quantizer=ema_reset --loss-vel=0.5 --recons-loss=l1_smooth --vision=21 --num-layers=2 --causal=False
+  //     ],
+  //     "justMyCode": false,
+  //     "env": {
+  //       "PYTHONPATH": "${workspaceFolder}/..:${env:PYTHONPATH}",
+  //       "TORCH_DISTRIBUTED_DEBUG": "INFO",
+  //       "CUDA_VISIBLE_DEVICES": "0",
+  //       "TOKENIZERS_PARALLELISM": "false"
+  //     }
+  //   }
+  // ]
   // ////////////////eval///////////////////////
   // "version": "0.2.0",
   // "configurations": [
@@ -230,4 +230,26 @@
   //     }
   //   }
   // ]
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Python 调试程序: 包含参数的当前文件",
+      "type": "debugpy",
+      "request": "launch",
+      // "program": "models/semantic.py",
+      "program": "dataset/cal_codebook.py",
+      "console": "integratedTerminal",
+      "args": [
+        // "--vqvae-train-dir=output/ParCo_official_HumanML3D/VQVAE-ParCo-t2m-default",
+        // "--select-vqvae-ckpt=fid"
+      ],
+      "justMyCode": false,
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}/..:${env:PYTHONPATH}",
+        "TORCH_DISTRIBUTED_DEBUG": "INFO",
+        "CUDA_VISIBLE_DEVICES": "0",
+        "TOKENIZERS_PARALLELISM": "false"
+      }
+    }
+  ]
 }
