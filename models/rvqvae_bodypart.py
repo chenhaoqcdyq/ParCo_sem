@@ -2891,7 +2891,7 @@ class EnhancedVQVAEv24(EnhancedVQVAEv21):
         elif args.lgvq==4:
             self.lgvq = LGVQv4(args, d_model=d_model, num_layers=args.num_layers)
         elif args.lgvq==5:
-            self.lgvq = LGVQv5(args, d_model=d_model)
+            self.lgvq = LGVQv5(args, d_model=d_model, num_layers=args.lglayers)
     
     def forward(self, motion, text=None):
         return super().forward(motion, text)

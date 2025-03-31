@@ -1099,7 +1099,7 @@ class LGVQv5(nn.Module):
     def __init__(self, args,
                  d_model=256,
                  nhead=4,  # 减少注意力头数
-                 num_layers=2,  # 减少Transformer层数
+                 num_layers=1,  # 减少Transformer层数
                  bert_hidden_dim=768,
                  vocab_size=30522,
                  dropout=0.2):  # 增加dropout率
