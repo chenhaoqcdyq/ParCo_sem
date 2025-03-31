@@ -5,7 +5,7 @@ import os
 from tqdm import tqdm
 
 # 配置参数
-data_dir = "dataset/HumanML3D/vqvae_code11"  # 替换为存放 .pth 文件的文件夹路径
+data_dir = "dataset/HumanML3D/vqvae_code24"  # 替换为存放 .pth 文件的文件夹路径
 excluded_codes = {512, 513}               # 不参与统计的 code
 total_codes = 514                        # Codebook 总大小（根据实际情况调整）
 

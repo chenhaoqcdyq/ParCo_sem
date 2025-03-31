@@ -204,7 +204,23 @@ if args.resume_pth:
         net.module.load_state_dict(ckpt['net'], strict=False)
     else:
         ckpt = torch.load(args.resume_pth, map_location='cpu')
-        net.load_state_dict(ckpt['net'], strict=False)
+        if args.lgvq == 5:
+            try:
+                new_ckpt = {}
+                for k, v in ckpt['net'].items():
+                    if 'bert_model' not in k:
+                        new_ckpt[k] = v
+                net.load_state_dict(new_ckpt, strict=False)
+                print("load lgvq model")
+            except:
+                new_ckpt = {}
+                for k, v in ckpt['net'].items():
+                    if 'lgvq' not in k:
+                        new_ckpt[k] = v
+                net.load_state_dict(new_ckpt, strict=False)
+                print("load wo lgvq model")
+        else:
+            net.load_state_dict(ckpt['net'], strict=False)
     
 net.train()
 # net.eval()
@@ -263,7 +279,6 @@ for nb_iter in range(1, args.warm_up_iter):
         gt_parts, text, text_token, text_feature, text_feature_all, text_id, text_mask = batch
     elif len(batch) == 8:
         gt_parts, text, text_token, text_feature, text_feature_all, text_id, text_mask, motion_mask = batch
-        # motion_mask = motion_mask.to(gt_parts[0].device).bool()
     else:
         raise ValueError("The length of batch is not correct.")
     for i in range(len(gt_parts)):

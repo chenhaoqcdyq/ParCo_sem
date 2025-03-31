@@ -7,6 +7,8 @@ import random
 import codecs as cs
 from tqdm import tqdm
 import os
+import sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import clip
 from functools import partial
 from transformers import AutoTokenizer
@@ -14,6 +16,8 @@ from typing import List, Dict
 from transformers import BertTokenizer, BertModel
 from transformers import CLIPModel, CLIPTokenizer
 import re
+from utils.misc import EasyDict
+from models import rvqvae_bodypart as vqvae
 
 class VQMotionDatasetBodyPart(data.Dataset):
     def __init__(self, dataset_name, window_size=64, unit_length=4, print_warning=False, strategy='basic', with_clip=False, get_vqvae=False):
@@ -45,12 +49,7 @@ class VQMotionDatasetBodyPart(data.Dataset):
         self.get_vqvae = get_vqvae
         self.text_mask_dir =  pjoin(self.data_root, 'texts_mask_deepseek')
         self.bert_feature_dir = pjoin(self.data_root, 'texts_bert_feature')
-        if self.with_clip:
-            os.makedirs(self.text_token_dir, exist_ok=True)
-            os.makedirs(self.text_feature_dir, exist_ok=True)
         os.makedirs(self.bert_feature_dir, exist_ok=True)
-        if self.with_clip:
-            clip_model, preprocess = clip.load('ViT-B/32')
         joints_num = self.joints_num
         
         
@@ -59,7 +58,7 @@ class VQMotionDatasetBodyPart(data.Dataset):
         self.mean = mean
         self.std = std
 
-        split_file = pjoin(self.data_root, 'train.txt')
+        split_file = pjoin(self.data_root, 'val.txt')
 
         self.data = []
         self.lengths = []
@@ -79,7 +78,7 @@ class VQMotionDatasetBodyPart(data.Dataset):
                     continue
                 text_data = []
                 text_path = pjoin(self.text_dir, name + '.txt')
-                text_tokens_path = pjoin(self.text_token_dir, name + '.pth')
+                # text_tokens_path = pjoin(self.text_token_dir, name + '.pth')
                 # if os.path.exists(text_path):
                 with cs.open(text_path, 'r') as f:
                     for line in f.readlines():
@@ -87,35 +86,6 @@ class VQMotionDatasetBodyPart(data.Dataset):
                         if len(line_split) > 0:
                             caption = line_split[0]
                             text_data.append(caption)
-                # text_mask_path = pjoin(self.text_mask_dir, name + '.json')
-                # text = ' '.join(text_data)  # 合并所有caption
-                if self.with_clip:
-                    device = clip_model.text_projection.device
-                    self.lengths.append(motion.shape[0] - self.window_size)
-                    if not os.path.exists(text_tokens_path):
-                        text_tokens = clip.tokenize(text_data, truncate = True).to(device)
-                        torch.save(text_tokens, text_tokens_path)
-                    else:
-                        text_tokens = torch.load(text_tokens_path, map_location=torch.device('cpu'))
-                    text_feature_path = pjoin(self.text_feature_dir, name + '.pth')
-                    if not os.path.exists(text_feature_path):
-                        with torch.no_grad():
-                            text_features = clip_model.encode_text(text_tokens)
-                        torch.save(text_features, text_feature_path)
-                        
-                    else:
-                        text_features = torch.load(text_feature_path, map_location=torch.device('cpu'))
-                    name_list.append(name)
-                    self.data.append({
-                    'motion': motion,      # 保持原始运动数据格式
-                    'text': text_data,           # 新增文本信息
-                    'text_token':text_tokens.cpu(),
-                    'text_feature': text_features.cpu(),
-                    'text_feature_all': text_features.cpu(),
-                    # 'text_mask':text_mask_data,
-                    'text_id': name
-                    })
-                else:
                     name_list.append(name)
                     self.data.append({
                     'motion': motion,      # 保持原始运动数据格式
@@ -127,12 +97,7 @@ class VQMotionDatasetBodyPart(data.Dataset):
                 print('Unable to load:', name)
 
         print("Total number of motions {}".format(len(self.data)))
-        # self.get_vqvae_code("output/00762-t2m-v24/VQVAE-v24-t2m-default/net_best_fid.pth","output/00762-t2m-v24/VQVAE-v24-t2m-default/train_config.json")
-        # self.get_vqvae_code("output/00381-t2m-v6/VQVAE-v6-t2m-default/net_best_fid.pth","output/00381-t2m-v6/VQVAE-v6-t2m-default/train_config.json")
-        # self.get_vqvae_code("output/00417-t2m-v11/VQVAE-v11-t2m-default/net_best_fid.pth","output/00417-t2m-v11/VQVAE-v11-t2m-default/train_config.json")
-        # self.get_vqvae_code("output/00729-t2m-v21/VQVAE-v21-t2m-default/net_best_fid.pth","output/00729-t2m-v21/VQVAE-v21-t2m-default/train_config.json")
         self.tokenizer_name = "bert-base-uncased"
-        # self.tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_name)
         self.bert_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
         self.bert_model = BertModel.from_pretrained('bert-base-uncased')
         self.bert_model.cuda()
@@ -150,6 +115,7 @@ class VQMotionDatasetBodyPart(data.Dataset):
             # text_feature_tmp.append()
             self.static_labels.append(tmp)
             self.bert_feature.append(self._get_text_features(self.raw_samples[i], self.bert_feature_dir))
+        # self.get_vqvae_code("output/00763-t2m-v24/VQVAE-v24-t2m-default/net_last.pth", "output/00763-t2m-v24/VQVAE-v24-t2m-default/train_args.json")
         del self.bert_model
         
     
@@ -246,59 +212,6 @@ class VQMotionDatasetBodyPart(data.Dataset):
                                 'position': pos
                             })
         return labels
-
-    # def _get_static_labels(self, sample: Dict) -> List[Dict]:
-    #     """从原始标注生成静态标签"""
-    #     labels = []
-    #     text = sample['original_text'].split()
-    #     for action in sample['masked_word']:
-    #         if len(action) > 2:
-    #             print(action)
-    #         # 处理核心动作
-    #         core_words = action[0][0].split() if (action!= [] and len(action)>1 and action[0]!= [] and action[0][0]) else []
-    #         for word in core_words:
-    #             if word in text:
-    #                 labels.append({
-    #                     'type': 'core',
-    #                     'word': word,
-    #                     'position': text.index(word)
-    #                 })
-    #         # 处理身体部位
-    #         body_words = action[0][1].split() if (action!= [] and len(action[0]) > 1 and action[0][1] != [] and action[0][1]) else []
-    #         for word in body_words:
-    #             if word in text:
-    #                 labels.append({
-    #                     'type': 'body',
-    #                     'word': word,
-    #                     'position': text.index(word)
-    #                 })
-    #         # 处理方向修饰
-    #         if len(action) > 1 and action[1] != []:
-    #             for i in range(len(action[1])):
-    #                 dir_words = action[1][i].split() if action[1][i] else []
-    #                 for word in dir_words:
-    #                     if word in text:
-    #                         labels.append({
-    #                             'type': 'dir',
-    #                             'word': word,
-    #                             'position': text.index(word)
-    #                         })
-    #     return labels
-
-    # def _build_labels(self, encoded: Dict, mask_labels: List) -> torch.Tensor:
-    #     """构建动态标签张量"""
-    #     labels = torch.full_like(encoded['input_ids'], -100)
-    #     tokenized_text = self.bert_tokenizer.convert_ids_to_tokens(encoded['input_ids'][0])
-        
-    #     for label in mask_labels:
-    #         pos = label['position'] + 1  # 由于加入了[CLS]，所以位置需要+1
-    #         if pos < len(tokenized_text):
-    #             # 处理subword情况
-    #             if tokenized_text[pos].startswith('##'):
-    #                 labels[0][pos] = -100
-    #             else:
-    #                 labels[0][pos] = self.bert_tokenizer.convert_tokens_to_ids(label['word'])
-    #     return labels.squeeze()
 
     def _build_labels(self, encoded: Dict, mask_labels: List) -> torch.Tensor:
         labels = torch.full_like(encoded['input_ids'], -100)
@@ -423,14 +336,7 @@ class VQMotionDatasetBodyPart(data.Dataset):
             code_idx = net.encode(parts, motion_mask)
             save_file = os.path.join(save_path, name + '.pth')
             torch.save(code_idx, save_file)
-        # codebook_list = []
-        # codebook_save_path = os.path.join(self.data_root, 'codebook',f'{args.vision}.pth')
-        # for idx, name in enumerate(net.enhancedvqvae.parts_name):
-        #     quantizer = getattr(net.enhancedvqvae, f'quantizer_{name}')
-        #     codebook_list.append(quantizer.codebook)
-        # torch.save(codebook_list, codebook_save_path)
         del net
-        # return save_path
     
     def __getitem__(self, item):
         # motion = self.data[item]
@@ -1037,18 +943,6 @@ def get_each_part_vel(parts, mode='t2m'):
     return parts_vel_list  # [Root_vel, R_Leg_vel, L_Leg_vel, Backbone_vel, R_Arm_vel, L_Arm_vel]
 
 
-# def custom_collate_fn(batch):
-#     motions, texts, text_features, text_ids = zip(*batch)
-    
-#     # 将 motions 转换为张量
-#     motions = [torch.stack(parts) for parts in zip(*motions)]
-    
-#     # 将 texts 和 text_features 转换为张量
-#     texts = list(texts)
-#     text_features = torch.stack(text_features)
-    
-#     return motions, texts, text_features, text_ids
-
 def DATALoader(dataset_name,
                batch_size,
                num_workers = 8,
@@ -1073,3 +967,61 @@ def cycle(iterable):
     while True:
         for x in iterable:
             yield x
+
+
+if __name__ == "__main__":
+    path = "output/00798-t2m-v24_lgvq4/VQVAE-v24_lgvq4-t2m-default"
+    json_file = os.path.join(path, 'train_config.json')
+    checkpoint_path = os.path.join(path, 'net_last.pth')
+    with open(json_file, 'r') as f:
+        train_args_dict = json.load(f)  # dict
+    args = EasyDict(train_args_dict) 
+    net = getattr(vqvae, f'HumanVQVAETransformerV{args.vision}')(args,  # use args to define different parameters in different quantizers
+                parts_code_nb=args.vqvae_arch_cfg['parts_code_nb'],
+                parts_code_dim=args.vqvae_arch_cfg['parts_code_dim'],
+                parts_output_dim=args.vqvae_arch_cfg['parts_output_dim'],
+                parts_hidden_dim=args.vqvae_arch_cfg['parts_hidden_dim'],
+                down_t=args.down_t,
+                stride_t=args.stride_t,
+                depth=args.depth,
+                dilation_growth_rate=args.dilation_growth_rate,
+                activation=args.vq_act,
+                norm=args.vq_norm
+            )
+    ckpt = torch.load(checkpoint_path, map_location='cpu')
+    net.load_state_dict(ckpt['net'], strict=True)
+    net.cuda()
+    net.eval()
+    train_loader = DATALoader(args.dataname,
+                            32,
+                            window_size=args.window_size,
+                            num_workers=10,
+                            unit_length=1)
+    train_loader_iter = cycle(train_loader)
+    R1, R2 = [], []
+    for i in tqdm(range(50)):
+        batch = next(train_loader_iter)
+        if len(batch) == 3:
+            gt_parts, text, text_id = batch
+        elif len(batch) == 6:   
+            gt_parts, text, text_token, text_feature, text_feature_all, text_id = batch
+        elif len(batch) == 7:
+            gt_parts, text, text_token, text_feature, text_feature_all, text_id, text_mask = batch
+        elif len(batch) == 8:
+            gt_parts, text, text_token, text_feature, text_feature_all, text_id, text_mask, motion_mask = batch
+        gt_parts = [part.cuda() for part in gt_parts]
+        # print(text)
+        
+        with torch.no_grad():
+            # for i in range(len(gt_parts[0])):
+            result = net.text_motion_topk(gt_parts, text, motion_mask=motion_mask, topk=5, text_mask=text_mask)
+        global_R, pred_R = result
+        R1.append(global_R)
+        R2.append(pred_R)
+        print(result)
+    R1_mean = np.mean(np.array(R1), axis=0)
+    R2_mean = np.mean(np.array(R2), axis=0)
+    print("R1 均值:", R1_mean)
+    print("R2 均值:", R2_mean)
+
+        

@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 from models.encdec import Encoder, Decoder, EnhancedDecoder, Decoder_wo_upsample, PureMotionDecoder
 import torch.nn.functional as F
-from models.lgvq import LGVQ, CausalTransformerEncoder, ContrastiveLossWithSTS, Dualsem_encoder, LGVQv2, LGVQv3
+from models.lgvq import LGVQ, CausalTransformerEncoder, ContrastiveLossWithSTS, ContrastiveLossWithSTSV2, Dualsem_encoder, LGVQv2, LGVQv3, LGVQv4, LGVQv5
 from models.quantize_cnn import QuantizeEMAReset, Quantizer, QuantizeEMA, QuantizeReset
 from models.residual_vq import ResidualVQ
 # from transformers import CLIPTextModel, CLIPTokenizer  # 使用Hugging Face版本
@@ -2708,7 +2708,7 @@ class EnhancedVQVAEv20(nn.Module):
             perplexity_list.append(perplexity)
             x_decoder = decoder(x_quantized)
             x_out_list.append(rearrange(x_decoder, 'b d t -> b t d'))
-        if self.args.lgvq==1:
+        if self.args.lgvq>=1:
             _, contrastive_loss = self.lgvq(x_quantized_list, text)
         else:
             contrastive_loss = torch.tensor(0.0).to(motion[0].device)
@@ -2736,7 +2736,7 @@ class EnhancedVQVAEv21(nn.Module):
             setattr(self, f'dec_{name}', decoder)
 
     def forward(self, motion, text=None):
-        if self.args.lgvq==1 and text is not None and len(text) == 4:
+        if self.args.lgvq>=1 and text is not None and len(text) == 4:
             text_feature, text_id, text_mask, motion_mask = text
         else:
             motion_mask, text_mask = None, None
@@ -2757,7 +2757,7 @@ class EnhancedVQVAEv21(nn.Module):
             perplexity_list.append(perplexity)
             x_decoder = decoder(x_quantized)
             x_out_list.append(rearrange(x_decoder, 'b d t -> b t d'))
-        if self.args.lgvq==1 and len(text) == 4:
+        if self.args.lgvq>=1 and len(text) == 4:
             # text_feature, text_id, text_mask, motion_mask = text
             _, loss = self.lgvq(x_quantized_list, [text_feature, text_id], text_mask, motion_mask)
         else:
@@ -2875,7 +2875,7 @@ class EnhancedVQVAEv23(nn.Module):
             perplexity_list.append(perplexity)
             x_decoder = decoder(x_quantized)
             x_out_list.append(rearrange(x_decoder, 'b d t -> b t d'))
-        if self.args.lgvq==1:
+        if self.args.lgvq>=1:
             _, contrastive_loss = self.lgvq(x_quantized_list, text)
         else:
             contrastive_loss = torch.tensor(0.0).to(motion[0].device)
@@ -2888,12 +2888,37 @@ class EnhancedVQVAEv24(EnhancedVQVAEv21):
         super().__init__(args=args, d_model=d_model)
         if args.lgvq==1:
             self.lgvq = LGVQv3(args, d_model=d_model, num_layers=args.num_layers)
+        elif args.lgvq==4:
+            self.lgvq = LGVQv4(args, d_model=d_model, num_layers=args.num_layers)
+        elif args.lgvq==5:
+            self.lgvq = LGVQv5(args, d_model=d_model)
     
     def forward(self, motion, text=None):
         return super().forward(motion, text)
     
     def encode(self, motion, motion_mask=None):
         return super().encode(motion, motion_mask)
+    
+    def text_motion_topk(self, motion, text, motion_mask=None, topk=5, text_mask=None):
+        fused_feat = self.cmt(motion, motion_mask)
+        # 原始编码流程
+        x_out_list = []
+        loss_list = []
+        perplexity_list = []
+        x_quantized_list = []
+        for idx, name in enumerate(self.parts_name):
+            quantizer = getattr(self, f'quantizer_{name}')
+            # decoder = getattr(self, f'dec_{name}')
+            x_encoder = fused_feat[idx, ...]
+            x_quantized, loss, perplexity = quantizer(rearrange(x_encoder, 'b t d -> b d t'))
+            x_quantized_list.append(x_quantized.permute(0,2,1))
+            loss_list.append(loss)
+            perplexity_list.append(perplexity)
+            # x_decoder = decoder(x_quantized)
+            # x_out_list.append(rearrange(x_decoder, 'b d t -> b t d'))
+            # text_feature, text_id, text_mask, motion_mask = text
+        result = self.lgvq.text_motion_topk(x_quantized_list, text, motion_mask, topk, text_mask)
+        return result
 
 class HumanVQVAETransformer(nn.Module):
     def __init__(self,
@@ -3284,11 +3309,11 @@ class HumanVQVAETransformerV23(HumanVQVAETransformer):
 
         return x_out_list, loss_list, perplexity_list, loss_extend
 
-class HumanVQVAETransformerV24(HumanVQVAETransformer):
+class HumanVQVAETransformerV24(nn.Module):
     def __init__(self, args, **kwargs):
-        super().__init__(args, **kwargs)
+        super().__init__()
         self.enhancedvqvae = EnhancedVQVAEv24(args, args.d_model)
-        del self.tokenizer, self.text_encoder, self.vqvae
+        # del self.tokenizer, self.text_encoder, self.vqvae
 
     def forward(self, x, caption = None):
         x_out_list, loss_list, perplexity_list, loss_extend = self.enhancedvqvae(x, caption)
@@ -3297,6 +3322,9 @@ class HumanVQVAETransformerV24(HumanVQVAETransformer):
 
     def encode(self, motion, motion_mask=None):
         return self.enhancedvqvae.encode(motion, motion_mask)
+    
+    def text_motion_topk(self, motion, text, motion_mask=None, topk=5, text_mask=None):
+        return self.enhancedvqvae.text_motion_topk(motion, text, motion_mask, topk, text_mask)
 
 def test_text():
     import clip
