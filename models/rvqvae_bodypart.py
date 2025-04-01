@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 from models.encdec import Encoder, Decoder, EnhancedDecoder, Decoder_wo_upsample, PureMotionDecoder
 import torch.nn.functional as F
-from models.lgvq import LGVQ, CausalTransformerEncoder, ContrastiveLossWithSTS, ContrastiveLossWithSTSV2, Dualsem_encoder, LGVQv2, LGVQv3, LGVQv4, LGVQv5
+from models.lgvq import LGVQ, CausalTransformerEncoder, ContrastiveLossWithSTS, ContrastiveLossWithSTSV2, Dualsem_encoder, LGVQv2, LGVQv3, LGVQv4, LGVQv5, TemporalDownsamplerV3
 from models.quantize_cnn import QuantizeEMAReset, Quantizer, QuantizeEMA, QuantizeReset
 from models.residual_vq import ResidualVQ
 # from transformers import CLIPTextModel, CLIPTokenizer  # 使用Hugging Face版本
@@ -1379,26 +1379,6 @@ class EnhancedPartFusionV12(nn.Module):
         # 残差连接增强
         return global_feat, rearrange(feature[:, :, 1:, :], 'b t p d -> p b t d', b=B)
 
-class TemporalDownsamplerV3(nn.Module):
-    """时间维度1/4降采样模块"""
-    def __init__(self, d_model):
-        super().__init__()
-        self.conv_layers = nn.Sequential(
-            nn.Conv1d(d_model, d_model, kernel_size=3, stride=2, padding=1),
-            nn.GELU(),
-            nn.Conv1d(d_model, d_model, kernel_size=3, stride=2, padding=1)
-        )
-        # self.norm = nn.LayerNorm(d_model)
-        
-    def forward(self, x):
-        """
-        输入形状: [B, T, C]
-        输出形状: [B, T//4, C]
-        """
-        x = x.permute(0, 2, 1)  # [B, C, T]
-        x = self.conv_layers(x)
-        x = x.permute(0, 2, 1)  # [B, T//4, C]
-        return x
     
 class TemporalDownsamplerV4(nn.Module):
     """时间维度1/4降采样模块"""
@@ -2887,11 +2867,11 @@ class EnhancedVQVAEv24(EnhancedVQVAEv21):
                  ):
         super().__init__(args=args, d_model=d_model)
         if args.lgvq==1:
-            self.lgvq = LGVQv3(args, d_model=d_model, num_layers=args.num_layers)
+            self.lgvq = LGVQv3(args, d_model=d_model, num_layers=args.lglayers)
         elif args.lgvq==4:
-            self.lgvq = LGVQv4(args, d_model=d_model, num_layers=args.num_layers)
+            self.lgvq = LGVQv4(args, d_model=d_model, num_layers=args.lglayers)
         elif args.lgvq==5:
-            self.lgvq = LGVQv5(args, d_model=d_model, num_layers=args.lglayers)
+            self.lgvq = LGVQv5(args, d_model=d_model, num_layers=args.lglayers, down_sample=args.down_sample if "down_sample" in args else False)
     
     def forward(self, motion, text=None):
         return super().forward(motion, text)

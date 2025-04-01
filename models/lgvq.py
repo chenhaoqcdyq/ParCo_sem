@@ -629,6 +629,7 @@ class LGVQv4(nn.Module):
                  num_layers=2,
                  bert_hidden_dim = 768,
                  vocab_size = 30522,
+                 down_sample = False,
                  ):
         super().__init__()
         # 全身特征聚合Token
@@ -699,7 +700,7 @@ class LGVQv4(nn.Module):
         global_part_tokens = self.global_part_token.expand(B*T, -1, -1)
         # 构建时空特征立方体 [B, T, 6, d_model]
         spatial_cube = torch.stack(part_embeds, dim=2)
-        
+        spatial_cube = self.down_sample(spatial_cube)
         # 构建融合输入 [B*T, 7, d_model]（6个部件+1个全局Token）
         fused_feat = torch.cat([
             global_part_tokens,
@@ -1102,7 +1103,8 @@ class LGVQv5(nn.Module):
                  num_layers=1,  # 减少Transformer层数
                  bert_hidden_dim=768,
                  vocab_size=30522,
-                 dropout=0.2):  # 增加dropout率
+                 dropout=0.2,
+                 down_sample = False):  # 增加dropout率
         super().__init__()
         # 改进1: 简化结构 + 正则化
         self.global_part_token = nn.Parameter(torch.randn(1, 1, d_model))
@@ -1192,20 +1194,165 @@ class LGVQv5(nn.Module):
             nn.Dropout(dropout),
             nn.GELU()
         )
+        self.ifdown_sample = down_sample
+        if down_sample:
+            self.down_sample = TemporalDownsamplerV3(d_model)
+        else:
+            self.down_sample = nn.Identity()
 
-
-    def forward(self, parts_feature, text=None, text_mask=None, motion_mask=None):
+    def text_motion_topk(self, motion, text, motion_mask=None, topk=5, text_mask=None):
+        """
+        计算动作和文本之间的Top-K匹配
+        Args:
+            motion: 动作特征列表 [6, B, T, D]
+            text: 文本字符串
+            motion_mask: 动作掩码 [B, T]
+            topk: 返回的top-k结果数
+            text_mask: 文本掩码字典
+        Returns:
+            [r1, r3, r5]: 召回率指标
+            [r1_mlm, r3_mlm, r5_mlm]: MLM任务的召回率指标
+        """
         # 部件特征预处理
-        B, T = parts_feature[0].shape[0], parts_feature[0].shape[1]
-        
+        B, T = motion[0].shape[0], motion[0].shape[1]
+        if self.ifdown_sample:
+            T = T // 4
+            
         # 时空位置编码注入
         part_embeds = []
-        for i, feat in enumerate(parts_feature):
-            part_embeds.append(feat + self.part_position.weight[i][None, None, :])
+        for i, feat in enumerate(motion):
+            part_embeds.append(self.down_sample(feat + self.part_position.weight[i][None, None, :]))
             
         # 构建时空特征立方体
         spatial_cube = torch.stack(part_embeds, dim=2)
         
+        # # 数据增强
+        # if self.training:
+        #     spatial_cube = self.motion_aug(spatial_cube)
+            
+        # 添加全局token
+        global_part_tokens = self.global_part_token.expand(B*T, -1, -1)
+        fused_feat = torch.cat([
+            global_part_tokens,
+            rearrange(spatial_cube, 'b t p d -> (b t) p d', b=B)
+        ], dim=1)
+        
+        # 空间特征处理
+        spatial_feat = rearrange(fused_feat, '(b t) p d-> (b t) p d', b=B, p=7)
+        spatial_feat = self.spatial_transformer(spatial_feat)
+        
+        # 时间特征处理
+        time_feat = rearrange(spatial_feat, '(b t) p d-> (b p) t d', b=B, p=7)
+        if motion_mask is not None:
+            if self.ifdown_sample:
+                motion_mask = motion_mask[:, ::4]
+            motion_mask = motion_mask.to(time_feat.device).bool()
+            time_key_padding_mask = motion_mask.repeat_interleave(7, dim=0)
+            time_feat = self.time_transformer(time_feat, src_key_padding_mask=~time_key_padding_mask)
+        else:
+            time_feat = self.time_transformer(time_feat)
+            
+        # 特征重组
+        feature = rearrange(time_feat, '(b p) t d -> b t p d', b=B, p=7)
+        global_feat = feature[:, :, 0, :].mean(dim=1)
+        motion_feature_global = self.motion_text_proj(global_feat)
+        
+        # 文本特征提取
+        bert_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+        encoded = bert_tokenizer(
+            text,
+            padding='max_length',
+            truncation=True,
+            max_length=128,
+            return_tensors='pt'
+        )
+        for k, v in encoded.items():
+            encoded[k] = v.to(motion[0].device)
+        bert_outputs = self.bert_model(**encoded)
+        text_feature = bert_outputs.pooler_output.to(motion[0].device).float()
+        text_feature_pooler = self.text_proj(text_feature)
+        
+        # 计算相似度矩阵
+        motion_feature_global = F.normalize(motion_feature_global, p=2, dim=-1)  # [B, d]
+        text_feature_pooler = F.normalize(text_feature_pooler, p=2, dim=-1)       # [B, d]
+        similarity_matrix = torch.mm(motion_feature_global, text_feature_pooler.T)
+        
+        # 计算召回指标
+        batch_size = similarity_matrix.size(0)
+        labels = torch.arange(batch_size).to(similarity_matrix.device)  # 对角线是正确匹配
+        
+        # 计算Top-K匹配
+        _, topk_indices = similarity_matrix.topk(topk, dim=1)  # [B, K]
+        
+        # 统计各召回率
+        correct_r1 = (topk_indices[:, 0] == labels).float().sum().cpu().item()
+        correct_r3 = (topk_indices == labels.unsqueeze(1)).any(dim=1).float().sum().cpu().item()
+        correct_r5 = (topk_indices == labels.unsqueeze(1)).any(dim=1).float().sum().cpu().item()
+
+        # MLM任务的召回率计算
+        if text_mask is not None:
+            input_ids = text_mask['input_ids'].to(motion[0].device)
+            labels = text_mask['labels'].to(motion[0].device).float()
+            attention_mask = text_mask['attention_mask'].to(motion[0].device).bool()
+            
+            with torch.no_grad():
+                bert_outputs = self.bert_model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask
+                )
+                text_feature = bert_outputs.last_hidden_state.to(motion[0].device).float()
+                text_feature_pooler = text_mask['feature'].to(motion[0].device).float()
+                
+            # 特征投影
+            text_query = self.text_proj(text_feature)
+            motion_query = self.motion_all_proj(rearrange(feature, 'b t p d -> b t (p d)'))
+            
+            # 跨模态注意力
+            for layer in self.cross_attn_layers:
+                text_query = layer(
+                    tgt=text_query,
+                    memory=motion_query,
+                    tgt_mask=None,
+                    memory_mask=None,
+                    memory_key_padding_mask=~motion_mask,
+                    tgt_key_padding_mask=~attention_mask,
+                )
+                
+            # MLM预测
+            logits = self.mlm_head(text_query)
+            
+            # 计算MLM任务的Top-K召回率
+            active_loss = (labels != -100).view(-1)
+            active_logits = logits.view(-1, self.vocab_size)[active_loss]
+            active_labels = labels.view(-1)[active_loss]
+            
+            topk_values, topk_indices = active_logits.topk(k=5, dim=-1)  # [active_num, 5]
+            active_labels = active_labels.long()  # [active_num]
+            expanded_labels = active_labels.unsqueeze(1).expand(-1, 5)  # [active_num, 5]
+            hits = (topk_indices == expanded_labels)  # [active_num, 5]
+            
+            r1_mlm = hits[:, 0].sum().float() / active_labels.size(0)
+            r3_mlm = hits[:, :3].sum(dim=1).clamp(max=1).sum().float() / active_labels.size(0)
+            r5_mlm = hits.sum().float() / active_labels.size(0)
+            
+            return [correct_r1/batch_size, correct_r3/batch_size, correct_r5/batch_size], \
+                   [r1_mlm.cpu().item(), r3_mlm.cpu().item(), r5_mlm.cpu().item()]
+                   
+        return [correct_r1/batch_size, correct_r3/batch_size, correct_r5/batch_size], [0, 0, 0]
+
+    def forward(self, parts_feature, text=None, text_mask=None, motion_mask=None):
+        # 部件特征预处理
+        B, T = parts_feature[0].shape[0], parts_feature[0].shape[1]
+        if self.ifdown_sample:
+            T = T // 4
+        # 时空位置编码注入
+        part_embeds = []
+        for i, feat in enumerate(parts_feature):
+            part_embeds.append(self.down_sample(feat + self.part_position.weight[i][None, None, :]))
+            
+        # 构建时空特征立方体
+        spatial_cube = torch.stack(part_embeds, dim=2)
+        # spatial_cube = self.down_sample(spatial_cube)
         # 数据增强
         if self.training:
             spatial_cube = self.motion_aug(spatial_cube)
@@ -1224,6 +1371,8 @@ class LGVQv5(nn.Module):
         # 时间特征处理
         time_feat = rearrange(spatial_feat, '(b t) p d-> (b p) t d', b=B, p=7)
         if motion_mask is not None:
+            if self.ifdown_sample:
+                motion_mask = motion_mask[:, ::4]
             motion_mask = motion_mask.to(time_feat.device).bool()
             time_key_padding_mask = motion_mask.repeat_interleave(7, dim=0)
             time_feat = self.time_transformer(time_feat, src_key_padding_mask=~time_key_padding_mask)
@@ -1366,6 +1515,27 @@ class TemporalDownsamplerCausal(nn.Module):
         x = x.permute(0, 2, 1)  # [B, C, T]
         x = self.conv_layers(x)
         return x.permute(0, 2, 1)  # [B, T//4, C]
+
+class TemporalDownsamplerV3(nn.Module):
+    """时间维度1/4降采样模块"""
+    def __init__(self, d_model):
+        super().__init__()
+        self.conv_layers = nn.Sequential(
+            nn.Conv1d(d_model, d_model, kernel_size=3, stride=2, padding=1),
+            nn.GELU(),
+            nn.Conv1d(d_model, d_model, kernel_size=3, stride=2, padding=1)
+        )
+        # self.norm = nn.LayerNorm(d_model)
+        
+    def forward(self, x):
+        """
+        输入形状: [B, T, C]
+        输出形状: [B, T//4, C]
+        """
+        x = x.permute(0, 2, 1)  # [B, C, T]
+        x = self.conv_layers(x)
+        x = x.permute(0, 2, 1)  # [B, T//4, C]
+        return x
 
 class Dualsem_encoder(nn.Module):
     def __init__(self, args, num_layers=4, d_model=256, nhead=8, bert_hidden_dim=768, vocab_size=30522):

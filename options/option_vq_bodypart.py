@@ -138,6 +138,7 @@ def get_args_parser(args=None):
     parser.add_argument('--vision', type=int, default=4, help='arch vision')
     parser.add_argument('--lgvq',  type=int, default=0, help='lgvq version 0: no lgvq 1: lgvq global 2: lgvq global+mask')
     parser.add_argument('--lglayers', type=int, default=2, help='num_layers')
+    parser.add_argument('--down_sample', type=int, default=0, help='down_sample')
 
     ## resume
     parser.add_argument("--resume-pth", type=str, default=None, help='resume pth for VQ')
