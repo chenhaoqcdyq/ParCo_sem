@@ -9,6 +9,7 @@ import clip
 from models.quantize_cnn import QuantizeEMAReset
 # from models.rvqvae_bodypart import CausalTransformerEncoder, ContrastiveLossWithSTSV2
 from models.vqvae_bodypart import VQVAE_bodypart
+from models.encdec import RepeatFirstElementPad1d
 
 class CausalTransformerEncoder(nn.TransformerEncoder):
     """带因果掩码的Transformer编码器"""
@@ -1419,12 +1420,16 @@ class LGVQv5(nn.Module):
             logits = self.mlm_head(text_query)
             
             # 标签平滑的MLM损失
-            loss_fct = LabelSmoothingCrossEntropy(smoothing=0.1)
+            # loss_fct = LabelSmoothingCrossEntropy(smoothing=0.1)
+            # active_loss = (labels != -100).view(-1)
+            # active_logits = logits.view(-1, self.vocab_size)[active_loss]
+            # active_labels = labels.view(-1)[active_loss]
+            # mlm_loss = loss_fct(active_logits, active_labels.long())
+            loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
             active_loss = (labels != -100).view(-1)
             active_logits = logits.view(-1, self.vocab_size)[active_loss]
             active_labels = labels.view(-1)[active_loss]
             mlm_loss = loss_fct(active_logits, active_labels.long())
-            
             # 对比损失
             text_feature_pooler = self.text_motion_proj(text_feature_pooler)
             contrastive_loss = self.contrastive_loss(motion_feature_global, text_feature_pooler, text_id)
@@ -1481,20 +1486,7 @@ class FeatureJitter(nn.Module):
         noise = torch.randn_like(x) * self.std
         return x + noise
 
-class RepeatFirstElementPad1d(nn.Module):
-    """自定义填充层：用第一个元素重复填充左侧"""
-    def __init__(self, padding):
-        super().__init__()
-        self.padding = padding
 
-    def forward(self, x):
-        # x形状: [B, C, T]
-        if self.padding == 0:
-            return x
-        # 取第一个元素并重复填充到左侧
-        first_elem = x[:, :, :1]  # [B, C, 1]
-        pad = first_elem.repeat(1, 1, self.padding)  # [B, C, padding]
-        return torch.cat([pad, x], dim=2)  # [B, C, padding + T]
 
 class TemporalDownsamplerCausal(nn.Module):
     """时间维度1/4降采样模块（因果卷积 + 首元素填充）"""
@@ -1518,13 +1510,22 @@ class TemporalDownsamplerCausal(nn.Module):
 
 class TemporalDownsamplerV3(nn.Module):
     """时间维度1/4降采样模块"""
-    def __init__(self, d_model):
+    def __init__(self, d_model, causal=False):
         super().__init__()
-        self.conv_layers = nn.Sequential(
-            nn.Conv1d(d_model, d_model, kernel_size=3, stride=2, padding=1),
-            nn.GELU(),
-            nn.Conv1d(d_model, d_model, kernel_size=3, stride=2, padding=1)
-        )
+        if causal:
+            self.conv_layers = nn.Sequential(
+                RepeatFirstElementPad1d(padding=2),
+                nn.Conv1d(d_model, d_model, kernel_size=3, stride=2, padding=0),
+                nn.GELU(),
+                RepeatFirstElementPad1d(padding=2),
+                nn.Conv1d(d_model, d_model, kernel_size=3, stride=2, padding=0)
+            )
+        else:
+            self.conv_layers = nn.Sequential(
+                nn.Conv1d(d_model, d_model, kernel_size=3, stride=2, padding=1),
+                nn.GELU(),
+                nn.Conv1d(d_model, d_model, kernel_size=3, stride=2, padding=1)
+            )
         # self.norm = nn.LayerNorm(d_model)
         
     def forward(self, x):

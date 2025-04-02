@@ -3,6 +3,8 @@ import torch
 import torch.nn as nn
 from models.resnet import Resnet1D
 from models.vq_model_dual import Normalize, nonlinearity
+from models.resnet import RepeatFirstElementPad1d
+import torch.nn.functional as F
 
 class PositionalEncoding(nn.Module):
     def __init__(self, src_dim, embed_dim, dropout, max_len=100, hid_dim=512):
@@ -47,10 +49,6 @@ class PositionalEncoding(nn.Module):
         emb = self.dropout(emb)
         # emb = emb.transpose(0, 1).reshape(raw_shape + (j_num, -1))
         return emb
-
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
 
 class CrossAttentionLayer(nn.Module):
     """交叉注意力层"""
@@ -232,46 +230,101 @@ class Decoder(nn.Module):
     def forward(self, x):
         return self.model(x)
     
-# class Decoder_wo_upsample(nn.Module):
-#     def __init__(self,
-#                  input_emb_width = 3,
-#                  output_emb_width = 512,
-#                  down_t = 3,
-#                  stride_t = 2,
-#                  width = 512,
-#                  depth = 3,
-#                  dilation_growth_rate = 3, 
-#                  activation='relu',
-#                  norm=None,
-#                  with_attn=False):
-#         super().__init__()
-#         blocks = []
+class Decoder_wo_upsamplev2(nn.Module):
+    def __init__(self,
+                 input_emb_width = 3,
+                 output_emb_width = 512,
+                 down_t = 3,
+                 stride_t = 2,
+                 width = 512,
+                 depth = 3,
+                 dilation_growth_rate = 3, 
+                 activation='relu',
+                 norm=None,
+                 with_attn=False,
+                 causal=False):
+        super().__init__()
+        blocks = []
         
-#         filter_t, pad_t = stride_t * 2, stride_t // 2
-#         self.with_attn = with_attn
-#         blocks.append(nn.Conv1d(output_emb_width, width, 3, 1, 1))
-#         blocks.append(nn.ReLU())
-#         for i in range(down_t):
-#             out_dim = width
-#             if self.with_attn:
-#                 block = nn.Sequential(
-#                     MotionAttention(width, num_heads=8),
-#                     Resnet1D(width, depth, dilation_growth_rate, reverse_dilation=True, activation=activation, norm=norm),
-#                     nn.Conv1d(width, out_dim, 3, 1, 1)
-#                 )
-#             else:
-#                 block = nn.Sequential(
-#                     Resnet1D(width, depth, dilation_growth_rate, reverse_dilation=True, activation=activation, norm=norm),
-#                     nn.Conv1d(width, out_dim, 3, 1, 1)
-#                 )
-#             blocks.append(block)
-#         blocks.append(nn.Conv1d(width, width, 3, 1, 1))
-#         blocks.append(nn.ReLU())
-#         blocks.append(nn.Conv1d(width, input_emb_width, 3, 1, 1))
-#         self.model = nn.Sequential(*blocks)
+        filter_t, pad_t = stride_t * 2, stride_t // 2
+        self.with_attn = with_attn
+        if causal:
+            padding = RepeatFirstElementPad1d(padding=(2, 0))
+            conv1 = nn.Conv1d(output_emb_width, width, 3, 1, 0)
+            conv2 = nn.Conv1d(width, width, 3, 1, 0)
+        else:
+            padding = nn.Identity()
+            conv1 = nn.Conv1d(output_emb_width, width, 3, 1, 1)
+            conv2 = nn.Conv1d(width, width, 3, 1, 1)
+        blocks.append(padding)
+        blocks.append(conv1)
+        blocks.append(nn.ReLU())
+        for i in range(down_t):
+            out_dim = width
+            if self.with_attn:
+                block = nn.Sequential(
+                    MotionAttention(width, num_heads=8),
+                    Resnet1D(width, depth, dilation_growth_rate, reverse_dilation=True, activation=activation, norm=norm, causal=causal),
+                    padding,
+                    conv2,
+                )
+            else:
+                block = nn.Sequential(
+                    Resnet1D(width, depth, dilation_growth_rate, reverse_dilation=True, activation=activation, norm=norm, causal=causal),
+                    padding,
+                    conv2,
+                )
+            blocks.append(block)
+        blocks.append(padding)
+        blocks.append(conv2)
+        blocks.append(nn.ReLU())
+        blocks.append(padding)
+        blocks.append(conv2)
+        self.model = nn.Sequential(*blocks)
 
-#     def forward(self, x):
-#         return self.model(x)
+    def forward(self, x):
+        return self.model(x)    
+
+class Decoder_wo_upsamplev1(nn.Module):
+    def __init__(self,
+                 input_emb_width = 3,
+                 output_emb_width = 512,
+                 down_t = 3,
+                 stride_t = 2,
+                 width = 512,
+                 depth = 3,
+                 dilation_growth_rate = 3, 
+                 activation='relu',
+                 norm=None,
+                 with_attn=False):
+        super().__init__()
+        blocks = []
+        
+        filter_t, pad_t = stride_t * 2, stride_t // 2
+        self.with_attn = with_attn
+        blocks.append(nn.Conv1d(output_emb_width, width, 3, 1, 1))
+        blocks.append(nn.ReLU())
+        for i in range(down_t):
+            out_dim = width
+            if self.with_attn:
+                block = nn.Sequential(
+                    MotionAttention(width, num_heads=8),
+                    Resnet1D(width, depth, dilation_growth_rate, reverse_dilation=True, activation=activation, norm=norm),
+                    nn.Conv1d(width, out_dim, 3, 1, 1)
+                )
+            else:
+                block = nn.Sequential(
+                    Resnet1D(width, depth, dilation_growth_rate, reverse_dilation=True, activation=activation, norm=norm),
+                    nn.Conv1d(width, out_dim, 3, 1, 1)
+                )
+            blocks.append(block)
+        blocks.append(nn.Conv1d(width, width, 3, 1, 1))
+        blocks.append(nn.ReLU())
+        blocks.append(nn.Conv1d(width, input_emb_width, 3, 1, 1))
+        self.model = nn.Sequential(*blocks)
+
+    def forward(self, x):
+        return self.model(x)
 
 class Decoder_wo_upsample(nn.Module):
     def __init__(self,
@@ -340,7 +393,6 @@ class Decoder_wo_upsample(nn.Module):
             x: 输入特征 [B, C, T]
             motion_mask: 注意力掩码 [B, 1, T] 或 None
         """
-        # if self.with_attn:
         x = self.blocks[0](x)  # 第一层卷积
         x = self.blocks[1](x)  # 第一层激活
         for block in self.blocks[2:-3]:  # 遍历解码块

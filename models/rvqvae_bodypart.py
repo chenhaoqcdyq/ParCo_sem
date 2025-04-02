@@ -3,7 +3,7 @@ from einops import rearrange
 from sentence_transformers import SentenceTransformer
 import torch
 import torch.nn as nn
-from models.encdec import Encoder, Decoder, EnhancedDecoder, Decoder_wo_upsample, PureMotionDecoder
+from models.encdec import Decoder_wo_upsamplev2, Encoder, Decoder, EnhancedDecoder, Decoder_wo_upsample, PureMotionDecoder
 import torch.nn.functional as F
 from models.lgvq import LGVQ, CausalTransformerEncoder, ContrastiveLossWithSTS, ContrastiveLossWithSTSV2, Dualsem_encoder, LGVQv2, LGVQv3, LGVQv4, LGVQv5, TemporalDownsamplerV3
 from models.quantize_cnn import QuantizeEMAReset, Quantizer, QuantizeEMA, QuantizeReset
@@ -2375,7 +2375,10 @@ class EnhancedVQVAEv11(nn.Module):
                 }
             # encoder降采样为0
             encoder = Encoder(self.parts_input_dim[name], d_model, down_t=args.down_t, stride_t=1, width=args.vqvae_arch_cfg['parts_hidden_dim'][name], depth=args.depth, dilation_growth_rate=args.dilation_growth_rate, activation=args.vq_act, norm=args.vq_norm)
-            decoder = Decoder_wo_upsample(self.parts_input_dim[name], d_model, down_t=args.down_t, stride_t=args.stride_t, width=args.vqvae_arch_cfg['parts_hidden_dim'][name], depth=args.depth, dilation_growth_rate=args.dilation_growth_rate, activation=args.vq_act, norm=args.vq_norm, with_attn=args.with_attn)
+            if args.decoder_vision == 1:
+                decoder = Decoder_wo_upsample(self.parts_input_dim[name], d_model, down_t=args.down_t, stride_t=args.stride_t, width=args.vqvae_arch_cfg['parts_hidden_dim'][name], depth=args.depth, dilation_growth_rate=args.dilation_growth_rate, activation=args.vq_act, norm=args.vq_norm, with_attn=args.with_attn)
+            elif args.decoder_vision == 2:
+                decoder = Decoder_wo_upsamplev2(self.parts_input_dim[name], d_model, down_t=args.down_t, stride_t=args.stride_t, width=args.vqvae_arch_cfg['parts_hidden_dim'][name], depth=args.depth, dilation_growth_rate=args.dilation_growth_rate, activation=args.vq_act, norm=args.vq_norm)
             quantizer = QuantizeEMAReset(args.vqvae_arch_cfg['parts_code_nb'][name], d_model, args)
             setattr(self, f'dec_{name}', decoder)
             setattr(self, f'quantizer_{name}', quantizer)
