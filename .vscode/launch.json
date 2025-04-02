@@ -102,19 +102,21 @@
         "--quantizer=ema_reset",
         "--loss-vel=0.5",
         "--recons-loss=l1_smooth",
-        "--vision=24",
+        "--vision=11",
         // "--decoder_vision=1",
         // "--num_quantizers=1",
         "--causal=True",
         // "--position=1",
+        // "--causal=True",
         "--num-layers=2",
+        "--decoder_vision=2",
         // "--numdec-layers=3",
         "--d_model=256",
-        "--with_attn=True",
+        // "--with_attn=True",
         // "--with_global=0",
         // "--text_dim=768",
-        "--resume-pth=output/00764-t2m-v24_lgvq4/VQVAE-v24_lgvq4-t2m-default/net_best_fid.pth",
-        "--lgvq=5",
+        // "--resume-pth=output/00764-t2m-v24_lgvq4/VQVAE-v24_lgvq4-t2m-default/net_best_fid.pth",
+        "--lgvq=0",
         // "--with_global=0"
         // "--eval-iter=10",
         // "--warm-up-iter=10"
@@ -124,7 +126,7 @@
       "env": {
         "PYTHONPATH": "${workspaceFolder}/..:${env:PYTHONPATH}",
         "TORCH_DISTRIBUTED_DEBUG": "INFO",
-        "CUDA_VISIBLE_DEVICES": "0",
+        "CUDA_VISIBLE_DEVICES": "1",
         "TOKENIZERS_PARALLELISM": "false"
       }
     }

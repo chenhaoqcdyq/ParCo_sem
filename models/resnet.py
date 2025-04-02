@@ -1,6 +1,6 @@
 import torch.nn as nn
 import torch
-from encdec import RepeatFirstElementPad1d
+# from models.encdec import RepeatFirstElementPad1d
 
 class nonlinearity(nn.Module):
     def __init__(self):
@@ -46,7 +46,7 @@ class ResConv1DBlock(nn.Module):
         # 因果卷积的特殊处理
         if causal:
             # 因果卷积需要左侧填充
-            self.pad = RepeatFirstElementPad1d(padding=(dilation * 2, 0))  # 左侧填充2*dilation
+            self.pad = RepeatFirstElementPad1d(padding=dilation * 2)  # 左侧填充2*dilation
             self.conv1 = nn.Conv1d(n_in, n_state, 3, 1, 0, dilation)  # padding=0
         else:
             # 非因果卷积使用对称填充

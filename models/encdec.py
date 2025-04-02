@@ -249,13 +249,15 @@ class Decoder_wo_upsamplev2(nn.Module):
         filter_t, pad_t = stride_t * 2, stride_t // 2
         self.with_attn = with_attn
         if causal:
-            padding = RepeatFirstElementPad1d(padding=(2, 0))
+            padding = RepeatFirstElementPad1d(padding=2)
             conv1 = nn.Conv1d(output_emb_width, width, 3, 1, 0)
             conv2 = nn.Conv1d(width, width, 3, 1, 0)
+            conv3 = nn.Conv1d(width, input_emb_width, 3, 1, 0)
         else:
             padding = nn.Identity()
             conv1 = nn.Conv1d(output_emb_width, width, 3, 1, 1)
             conv2 = nn.Conv1d(width, width, 3, 1, 1)
+            conv3 = nn.Conv1d(width, input_emb_width, 3, 1, 1)
         blocks.append(padding)
         blocks.append(conv1)
         blocks.append(nn.ReLU())
@@ -279,7 +281,7 @@ class Decoder_wo_upsamplev2(nn.Module):
         blocks.append(conv2)
         blocks.append(nn.ReLU())
         blocks.append(padding)
-        blocks.append(conv2)
+        blocks.append(conv3)
         self.model = nn.Sequential(*blocks)
 
     def forward(self, x):

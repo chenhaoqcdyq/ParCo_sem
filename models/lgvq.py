@@ -4,12 +4,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from einops import rearrange
-# from transformers import CLIPModel, CLIPTokenizer
+import sys, os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import clip
 from models.quantize_cnn import QuantizeEMAReset
 # from models.rvqvae_bodypart import CausalTransformerEncoder, ContrastiveLossWithSTSV2
 from models.vqvae_bodypart import VQVAE_bodypart
 from models.encdec import RepeatFirstElementPad1d
+
 
 class CausalTransformerEncoder(nn.TransformerEncoder):
     """带因果掩码的Transformer编码器"""
@@ -701,7 +703,7 @@ class LGVQv4(nn.Module):
         global_part_tokens = self.global_part_token.expand(B*T, -1, -1)
         # 构建时空特征立方体 [B, T, 6, d_model]
         spatial_cube = torch.stack(part_embeds, dim=2)
-        spatial_cube = self.down_sample(spatial_cube)
+        # spatial_cube = self.down_sample(spatial_cube)
         # 构建融合输入 [B*T, 7, d_model]（6个部件+1个全局Token）
         fused_feat = torch.cat([
             global_part_tokens,
@@ -1104,8 +1106,8 @@ class LGVQv5(nn.Module):
                  num_layers=1,  # 减少Transformer层数
                  bert_hidden_dim=768,
                  vocab_size=30522,
-                 dropout=0.2,
-                 down_sample = False):  # 增加dropout率
+                 dropout=0.2,   # 增加dropout率
+                 down_sample = False):  
         super().__init__()
         # 改进1: 简化结构 + 正则化
         self.global_part_token = nn.Parameter(torch.randn(1, 1, d_model))
@@ -1227,9 +1229,6 @@ class LGVQv5(nn.Module):
         # 构建时空特征立方体
         spatial_cube = torch.stack(part_embeds, dim=2)
         
-        # # 数据增强
-        # if self.training:
-        #     spatial_cube = self.motion_aug(spatial_cube)
             
         # 添加全局token
         global_part_tokens = self.global_part_token.expand(B*T, -1, -1)
@@ -1271,7 +1270,7 @@ class LGVQv5(nn.Module):
             encoded[k] = v.to(motion[0].device)
         bert_outputs = self.bert_model(**encoded)
         text_feature = bert_outputs.pooler_output.to(motion[0].device).float()
-        text_feature_pooler = self.text_proj(text_feature)
+        text_feature_pooler = self.text_motion_proj(text_feature)
         
         # 计算相似度矩阵
         motion_feature_global = F.normalize(motion_feature_global, p=2, dim=-1)  # [B, d]
@@ -1679,3 +1678,13 @@ class Dualsem_encoder(nn.Module):
             contrastive_loss = torch.tensor(0.0).to(parts_feature[0].device)
         
         return feature_quantized, [contrastive_loss, mlm_loss]
+    
+if __name__ == '__main__':
+    model = TemporalDownsamplerV3(d_model=256, causal=True)
+    x = torch.randn(1, 10, 256)  # [B, T, C]
+    out = model(x)
+    print(out.shape)
+    model = TemporalDownsamplerV3(d_model=256, causal=False)
+    x = torch.randn(1, 10, 256)  # [B, T, C]
+    out = model(x)
+    print(out.shape)
