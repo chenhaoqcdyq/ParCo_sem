@@ -288,7 +288,7 @@ for nb_iter in range(1, args.warm_up_iter):
     for i in range(len(gt_parts)):
         gt_parts[i] = gt_parts[i].to(device).float()
 
-    if args.lgvq >= 0:
+    if args.lgvq > 0:
         cond = [text_feature, text_id, text_mask, motion_mask]
         # print(args.vision, "cond = [text_feature, text_id, text_mask, motion_mask]")
     elif args.vision >= 17:
@@ -377,7 +377,7 @@ for nb_iter in range(1, args.total_iter + 1):
         raise ValueError("The length of batch is not correct.")
     for i in range(len(gt_parts)):
         gt_parts[i] = gt_parts[i].to(device).float()
-    if args.lgvq >= 0:
+    if args.lgvq > 0:
         cond = [text_feature, text_id, text_mask, motion_mask]
         if nb_iter > args.sem_iter and train_loader.dataset.strategy == 'basic' :
             train_loader.dataset.strategy = 'medium'

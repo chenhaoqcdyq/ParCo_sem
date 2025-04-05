@@ -102,7 +102,7 @@
         "--quantizer=ema_reset",
         "--loss-vel=0.5",
         "--recons-loss=l1_smooth",
-        "--vision=11",
+        "--vision=24",
         // "--decoder_vision=1",
         // "--num_quantizers=1",
         // "--causal=True",
@@ -116,8 +116,8 @@
         // "--with_attn=True",
         // "--with_global=0",
         // "--text_dim=768",
-        "--resume-pth=output/00417-t2m-v11/VQVAE-v11-t2m-default/net_last.pth",
-        "--lgvq=5",
+        "--resume-pth=output/00729-t2m-v21/VQVAE-v21-t2m-default/net_best_fid.pth",
+        "--lgvq=6",
         // "--with_global=0"
         // "--eval-iter=10",
         // "--warm-up-iter=10"
