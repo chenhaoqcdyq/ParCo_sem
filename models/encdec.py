@@ -187,6 +187,56 @@ class Encoder(nn.Module):
     def forward(self, x):
         return self.model(x)
 
+class Encoderv2(nn.Module):
+    def __init__(self,
+                 input_emb_width = 3,
+                 output_emb_width = 512,
+                 down_t = 3,
+                 stride_t = 2,
+                 width = 512,
+                 depth = 3,
+                 dilation_growth_rate = 3,
+                 activation='relu',
+                 norm=None,
+                 causal=False):
+        super().__init__()
+        
+        self.causal = causal
+        blocks = []
+        if stride_t == 1:
+            pad_t, filter_t = 1, 3
+        else:
+            filter_t, pad_t = stride_t * 2, stride_t // 2
+        if causal:
+            padding = RepeatFirstElementPad1d(padding=2)
+            conv1 = nn.Conv1d(input_emb_width, width, 3, 1, 0)
+            conv2 = nn.Conv1d(width, output_emb_width, 3, 1, 0)
+            padding1 = RepeatFirstElementPad1d(padding=2 * pad_t)
+            conv3 = nn.Conv1d(width, width, filter_t, stride_t, 0)
+        else:
+            padding = nn.Identity()
+            conv1 = nn.Conv1d(input_emb_width, width, 3, 1, 1)
+            conv2 = nn.Conv1d(width, output_emb_width, 3, 1, 1)
+            padding1 = nn.Identity()
+            conv3 = nn.Conv1d(width, width, filter_t, stride_t, pad_t)
+        blocks.append(padding)
+        blocks.append(conv1)
+        blocks.append(nn.ReLU())
+
+        for i in range(down_t):
+            # input_dim = width
+            block = nn.Sequential(
+                padding1,
+                conv3,
+                Resnet1D(width, depth, dilation_growth_rate, activation=activation, norm=norm, causal=causal),
+            )
+            blocks.append(block)
+        blocks.append(padding)
+        blocks.append(conv2)
+        self.model = nn.Sequential(*blocks)
+
+    def forward(self, x):
+        return self.model(x)
 
 class Decoder(nn.Module):
     def __init__(self,

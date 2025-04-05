@@ -1139,10 +1139,7 @@ class LGVQv5(nn.Module):
         self.bert_model = BertModel.from_pretrained('bert-base-uncased')
         for param in self.bert_model.parameters():
             param.requires_grad = False  # 默认冻结
-        # # 解冻最后3层
-        # for layer in self.bert_model.encoder.layer[-3:]:
-        #     for param in layer.parameters():
-        #         param.requires_grad = True
+
 
         # 改进5: 加强投影层正则化
         self.text_proj = nn.Sequential(
@@ -1341,7 +1338,7 @@ class LGVQv5(nn.Module):
         return [correct_r1/batch_size, correct_r3/batch_size, correct_r5/batch_size], [0, 0, 0]
 
     def forward(self, parts_feature, text=None, text_mask=None, motion_mask=None):
-        # 部件特征预处理
+        # 部件特征预处理 bs,6,seq,d
         B, T = parts_feature[0].shape[0], parts_feature[0].shape[1]
         if self.ifdown_sample:
             T = T // 4
@@ -1419,16 +1416,16 @@ class LGVQv5(nn.Module):
             logits = self.mlm_head(text_query)
             
             # 标签平滑的MLM损失
-            # loss_fct = LabelSmoothingCrossEntropy(smoothing=0.1)
-            # active_loss = (labels != -100).view(-1)
-            # active_logits = logits.view(-1, self.vocab_size)[active_loss]
-            # active_labels = labels.view(-1)[active_loss]
-            # mlm_loss = loss_fct(active_logits, active_labels.long())
-            loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
+            loss_fct = LabelSmoothingCrossEntropy(smoothing=0.05)
             active_loss = (labels != -100).view(-1)
             active_logits = logits.view(-1, self.vocab_size)[active_loss]
             active_labels = labels.view(-1)[active_loss]
             mlm_loss = loss_fct(active_logits, active_labels.long())
+            # loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
+            # active_loss = (labels != -100).view(-1)
+            # active_logits = logits.view(-1, self.vocab_size)[active_loss]
+            # active_labels = labels.view(-1)[active_loss]
+            # mlm_loss = loss_fct(active_logits, active_labels.long())
             # 对比损失
             text_feature_pooler = self.text_motion_proj(text_feature_pooler)
             contrastive_loss = self.contrastive_loss(motion_feature_global, text_feature_pooler, text_id)

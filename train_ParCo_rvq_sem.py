@@ -8,7 +8,7 @@ import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
 
 from dataset import  dataset_TM_eval_bodypart
-from dataset import dataset_VQ_bodypart_text_mask_196 as dataset_VQ_bodypart_text
+
 # from dataset import dataset_VQ_bodypart_text_woclip, dataset_TM_eval_bodypart
 from models import rvqvae_bodypart as vqvae
 from models.evaluator_wrapper import EvaluatorModelWrapper
@@ -96,6 +96,10 @@ if args.bodyconfig == True:
     args.vqvae_arch_cfg = vqvae_bodypart_cfg_plus[args.vqvae_cfg]
 else:
     args.vqvae_arch_cfg = vqvae_bodypart_cfg[args.vqvae_cfg]
+if args.lgvq > 0:
+    from dataset import dataset_VQ_bodypart_text_mask_196 as dataset_VQ_bodypart_text
+else:
+    from dataset import dataset_VQ_bodypart_text_mask as dataset_VQ_bodypart_text
 ##### ---- Exp dirs ---- #####
 """
 Directory of our exp:
@@ -284,7 +288,7 @@ for nb_iter in range(1, args.warm_up_iter):
     for i in range(len(gt_parts)):
         gt_parts[i] = gt_parts[i].to(device).float()
 
-    if args.vision >= 21:
+    if args.lgvq >= 0:
         cond = [text_feature, text_id, text_mask, motion_mask]
         # print(args.vision, "cond = [text_feature, text_id, text_mask, motion_mask]")
     elif args.vision >= 17:
@@ -373,7 +377,7 @@ for nb_iter in range(1, args.total_iter + 1):
         raise ValueError("The length of batch is not correct.")
     for i in range(len(gt_parts)):
         gt_parts[i] = gt_parts[i].to(device).float()
-    if args.vision >= 21:
+    if args.lgvq >= 0:
         cond = [text_feature, text_id, text_mask, motion_mask]
         if nb_iter > args.sem_iter and train_loader.dataset.strategy == 'basic' :
             train_loader.dataset.strategy = 'medium'
