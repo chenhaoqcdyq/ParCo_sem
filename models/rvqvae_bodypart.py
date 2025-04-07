@@ -2919,7 +2919,7 @@ class EnhancedVQVAEv24(EnhancedVQVAEv21):
             perplexity_list.append(perplexity)
             x_decoder = decoder(x_quantized)
             x_out_list.append(rearrange(x_decoder, 'b d t -> b t d'))
-        if self.args.lgvq>=6:
+        if self.args.lgvq>=6 and text is not None and len(text) == 4:
             cls_token, loss, commit = self.dual(x_encoder_list, [text_feature, text_id], text_mask, motion_mask)
             loss_commit, perplexity_sem = commit
             loss_list.append(loss_commit)

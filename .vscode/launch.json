@@ -90,7 +90,7 @@
         "--exp-name=train_ParCo_rvq_sem",
         "--dataname=t2m",
         "--batch-size=64",
-        "--print-iter=10",
+        // "--print-iter=10",
         "--lr=2e-4",
         "--total-iter=300000",
         "--lr-scheduler=200000",
@@ -119,6 +119,7 @@
         "--resume-pth=output/00729-t2m-v21/VQVAE-v21-t2m-default/net_best_fid.pth",
         "--lgvq=7",
         "--down_sample=1",
+        "--freeze_encdec=1",
         // "--with_global=0"
         // "--eval-iter=10",
         // "--warm-up-iter=10"

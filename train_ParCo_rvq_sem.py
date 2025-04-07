@@ -225,7 +225,13 @@ if args.resume_pth:
                 print("load wo lgvq model")
         else:
             net.load_state_dict(ckpt['net'], strict=False)
-    
+            
+if args.freeze_encdec:
+    for name, param in net.named_parameters():
+        if ('dual' in name or 'lgvq' in name) and "bert_model" not in name:
+            param.requires_grad = True
+        else:
+            param.requires_grad = False
 net.train()
 # net.eval()
 net.to(device)
