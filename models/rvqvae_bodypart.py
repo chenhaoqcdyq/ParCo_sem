@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 from models.encdec import Decoder_wo_upsamplev1, Decoder_wo_upsamplev2, Encoder, Decoder, Encoderv2, EnhancedDecoder, Decoder_wo_upsample, PureMotionDecoder
 import torch.nn.functional as F
-from models.lgvq import LGVQ, CausalTransformerEncoder, ContrastiveLossWithSTS, ContrastiveLossWithSTSV2, Dualsem_encoder, Dualsem_encoderv2, LGVQv2, LGVQv3, LGVQv4, LGVQv5, TemporalDownsamplerV3
+from models.lgvq import LGVQ, CausalTransformerEncoder, ContrastiveLossWithSTS, ContrastiveLossWithSTSV2, Dualsem_encoder, Dualsem_encoderv2, Dualsem_encoderv3, LGVQv2, LGVQv3, LGVQv4, LGVQv5, TemporalDownsamplerV3
 from models.quantize_cnn import QuantizeEMAReset, Quantizer, QuantizeEMA, QuantizeReset
 from models.residual_vq import ResidualVQ
 # from transformers import CLIPTextModel, CLIPTokenizer  # 使用Hugging Face版本
@@ -2892,6 +2892,8 @@ class EnhancedVQVAEv24(EnhancedVQVAEv21):
             self.lgvq = LGVQv5(args, d_model=d_model, num_layers=args.lglayers, down_sample=args.down_sample if "down_sample" in args else False)
         elif args.lgvq==6:
             self.dual = Dualsem_encoderv2(args, num_layers=args.lglayers, d_model=d_model, down_sample=args.down_sample if "down_sample" in args else False)
+        elif args.lgvq==7:
+            self.dual = Dualsem_encoderv3(args, d_model=d_model, down_sample=args.down_sample if "down_sample" in args else False)
     
     def forward(self, motion, text=None):
         if self.args.lgvq>=1 and text is not None and len(text) == 4:
@@ -2917,11 +2919,11 @@ class EnhancedVQVAEv24(EnhancedVQVAEv21):
             perplexity_list.append(perplexity)
             x_decoder = decoder(x_quantized)
             x_out_list.append(rearrange(x_decoder, 'b d t -> b t d'))
-        if self.args.lgvq==6:
+        if self.args.lgvq>=6:
             cls_token, loss, commit = self.dual(x_encoder_list, [text_feature, text_id], text_mask, motion_mask)
             loss_commit, perplexity_sem = commit
             loss_list.append(loss_commit)
-            perplexity.append(perplexity_sem)
+            perplexity_list.append(perplexity_sem)
         elif self.args.lgvq>=1 and len(text) == 4:
             # text_feature, text_id, text_mask, motion_mask = text
             _, loss = self.lgvq(x_quantized_list, [text_feature, text_id], text_mask, motion_mask)
@@ -2935,7 +2937,7 @@ class EnhancedVQVAEv24(EnhancedVQVAEv21):
     def text_motion_topk(self, motion, text, motion_mask=None, topk=5, text_mask=None):
         fused_feat = self.cmt(motion, motion_mask)
         # 原始编码流程
-        x_out_list = []
+        x_encoder_list = []
         loss_list = []
         perplexity_list = []
         x_quantized_list = []
@@ -2943,6 +2945,7 @@ class EnhancedVQVAEv24(EnhancedVQVAEv21):
             quantizer = getattr(self, f'quantizer_{name}')
             # decoder = getattr(self, f'dec_{name}')
             x_encoder = fused_feat[idx, ...]
+            x_encoder_list.append(x_encoder)
             x_quantized, loss, perplexity = quantizer(rearrange(x_encoder, 'b t d -> b d t'))
             x_quantized_list.append(x_quantized.permute(0,2,1))
             loss_list.append(loss)
@@ -2950,7 +2953,10 @@ class EnhancedVQVAEv24(EnhancedVQVAEv21):
             # x_decoder = decoder(x_quantized)
             # x_out_list.append(rearrange(x_decoder, 'b d t -> b t d'))
             # text_feature, text_id, text_mask, motion_mask = text
-        result = self.lgvq.text_motion_topk(x_quantized_list, text, motion_mask, topk, text_mask)
+        if self.args.lgvq>=6:
+            result = self.dual.text_motion_topk(x_encoder_list, text, motion_mask, topk, text_mask)
+        else:
+            result = self.lgvq.text_motion_topk(x_quantized_list, text, motion_mask, topk, text_mask)
         return result
 
 class HumanVQVAETransformer(nn.Module):

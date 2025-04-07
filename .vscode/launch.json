@@ -117,7 +117,8 @@
         // "--with_global=0",
         // "--text_dim=768",
         "--resume-pth=output/00729-t2m-v21/VQVAE-v21-t2m-default/net_best_fid.pth",
-        "--lgvq=6",
+        "--lgvq=7",
+        "--down_sample=1",
         // "--with_global=0"
         // "--eval-iter=10",
         // "--warm-up-iter=10"
