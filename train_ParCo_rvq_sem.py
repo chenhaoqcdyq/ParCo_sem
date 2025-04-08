@@ -36,6 +36,18 @@ def update_lr_warm_up(optimizer, nb_iter, warm_up_iter, lr):
 
     return optimizer, current_lr
 
+def freeze_encdec(net):
+    for name, param in net.named_parameters():
+        if ('dual' in name or 'lgvq' in name) and "bert_model" not in name:
+            param.requires_grad = True
+        else:
+            param.requires_grad = False
+    for name, module in net.named_modules():
+        if ('dual' in name or 'lgvq' in name) and "bert_model" not in name:
+            module.train()
+        else:
+            module.eval()
+    return net
 # 在解析args后添加分布式初始化逻辑
 def setup_distributed():
     # 读取环境变量
@@ -225,14 +237,10 @@ if args.resume_pth:
                 print("load wo lgvq model")
         else:
             net.load_state_dict(ckpt['net'], strict=False)
-            
+
+net.train()       
 if args.freeze_encdec:
-    for name, param in net.named_parameters():
-        if ('dual' in name or 'lgvq' in name) and "bert_model" not in name:
-            param.requires_grad = True
-        else:
-            param.requires_grad = False
-net.train()
+    net = freeze_encdec(net)
 # net.eval()
 net.to(device)
 
@@ -258,14 +266,15 @@ print('\n===> Constructing optimizer, scheduler, and Loss...')
 def get_optimizer_params(net, base_lr, vqvae_lr):
     params = []
     for name, param in net.named_parameters():
-        if 'vqvae' in name and 'enhancedvqvae' not in name:
-            params.append({'params': param, 'lr': vqvae_lr})
-        else:
-            params.append({'params': param, 'lr': base_lr})
+        if param.requires_grad:  # 只添加requires_grad=True的参数
+            if 'vqvae' in name and 'enhancedvqvae' not in name:
+                params.append({'params': param, 'lr': vqvae_lr})
+            else:
+                params.append({'params': param, 'lr': base_lr})
     return params
 
 # optimizer_params = get_optimizer_params(net, args.lr, args.lr * 0.1)
-optimizer = optim.AdamW(net.parameters(), lr=args.lr, betas=(0.9, 0.99), weight_decay=args.weight_decay)
+optimizer = optim.AdamW(get_optimizer_params(net, args.lr, args.lr), betas=(0.9, 0.99), weight_decay=args.weight_decay)
 
 scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=args.lr_scheduler, gamma=args.gamma)
 Loss = losses.ReConsLossBodyPart(args.recons_loss, args.nb_joints)
@@ -359,8 +368,11 @@ best_fid, best_iter, best_div, best_top1, best_top2, best_top3, best_matching, w
         args.run_dir, val_loader, net, logger, writer, 0,
         best_fid=1000, best_iter=0, best_div=100, best_top1=0, best_top2=0, best_top3=0, best_matching=100,
         eval_wrapper=eval_wrapper)
+if args.freeze_encdec:
+    net = freeze_encdec(net)
 
 ##### ---- Training ---- #####
+
 print('\n\n===> Start training\n\n')
 avg_recons, avg_perplexity, avg_commit = 0., 0., 0.
 avg_contrastive, avg_disentangle = 0., 0.
@@ -458,4 +470,5 @@ for nb_iter in range(1, args.total_iter + 1):
                 args.run_dir, val_loader, net, logger, writer, nb_iter,
                 best_fid, best_iter, best_div, best_top1, best_top2, best_top3, best_matching,
                 eval_wrapper=eval_wrapper, best_mpjpe=best_mpjpe)
-        
+        if args.freeze_encdec:
+            net = freeze_encdec(net)

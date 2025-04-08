@@ -2189,13 +2189,20 @@ class Dualsem_encoderv3(nn.Module):
         # 时间特征处理
         time_feat = rearrange(spatial_feat, '(b t) p d-> (b p) t d', b=B, p=7)
         if motion_mask is not None:
-            if self.ifdown_sample:
-                motion_mask = motion_mask[:, ::4]
             motion_mask = motion_mask.to(time_feat.device).bool()
             time_key_padding_mask = motion_mask.repeat_interleave(7, dim=0)
-            time_feat = self.time_transformer(time_feat, src_key_padding_mask=~time_key_padding_mask)
+            
+            # 在每一层Transformer后应用时间降采样
+            for i, layer in enumerate(self.time_transformer.layers):
+                time_feat = self.time_downsamplers[i](time_feat)
+                if self.ifdown_sample:
+                    time_key_padding_mask = time_key_padding_mask[:, ::2]  # 更新mask
+                time_feat = layer(time_feat, src_key_padding_mask=~time_key_padding_mask)
         else:
-            time_feat = self.time_transformer(time_feat)
+            # 在每一层Transformer后应用时间降采样
+            for i, layer in enumerate(self.time_transformer.layers):
+                time_feat = self.time_downsamplers[i](time_feat)
+                time_feat = layer(time_feat)
         
         # 特征重组
         feature = rearrange(time_feat, '(b p) t d -> b t p d', b=B, p=7)
@@ -2255,7 +2262,8 @@ class Dualsem_encoderv3(nn.Module):
             # 特征投影
             text_query = self.text_proj(text_feature)
             motion_query = self.motion_all_proj(cls_token)
-            
+            if self.ifdown_sample:
+                motion_mask = motion_mask[:, ::4]
             # 跨模态注意力
             for layer in self.cross_attn_layers:
                 text_query = layer(

@@ -970,7 +970,7 @@ def cycle(iterable):
 
 
 if __name__ == "__main__":
-    path = "output/00862-t2m-v24_dual_layer1/VQVAE-v24_dual_layer1-t2m-default"
+    path = "output/00871-t2m-v24_dual3_downlayer1/VQVAE-v24_dual3_downlayer1-t2m-default"
     json_file = os.path.join(path, 'train_config.json')
     checkpoint_path = os.path.join(path, 'net_last.pth')
     with open(json_file, 'r') as f:
