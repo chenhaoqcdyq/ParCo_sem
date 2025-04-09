@@ -283,6 +283,162 @@ class LGVQv2(nn.Module):
         self.vocab_size = vocab_size
         self.motion_text_proj = nn.Linear(d_model, bert_hidden_dim)
 
+    def text_motion_topk(self, motion, text, motion_mask=None, topk=5, text_mask=None):
+        """
+        计算动作特征和文本特征的Top-K匹配
+        Args:
+            motion: 动作特征列表 [bs, seq, d]
+            text: 文本列表
+            motion_mask: 动作mask
+            topk: Top-K值
+            text_mask: 文本mask
+        Returns:
+            recall_metrics: 包含R@1, R@3, R@5的字典
+        """
+        # 部件特征预处理
+        part_embeds = []
+        for i,  feat in enumerate(motion):
+            # 注入空间位置编码
+            part_embeds.append(feat + self.part_position.weight[i][None, None, :])
+        B, T = motion[0].shape[0], motion[0].shape[1]
+        global_part_tokens = self.global_part_token.expand(B*T, -1, -1)
+        if self.global_token_mode == 0:
+            global_time_tokens = self.global_time_token.expand(B*7, -1, -1)
+        # 构建时空特征立方体 [B, T, 6, d_model]
+        spatial_cube = torch.stack(part_embeds, dim=2)
+        # 构建融合输入 [B*T, 7, d_model]（6个部件+1个全局Token）
+        fused_feat = torch.cat([
+            global_part_tokens,
+            rearrange(spatial_cube, 'b t p d -> (b t) p d', b=B)
+        ], dim=1)
+        # 空间维度交互 (部件间关系)        spatial_cube = spatial_cube + self.time_position[:, :T, :][None, :, None, :]
+        spatial_feat = rearrange(fused_feat, '(b t) p d-> (b t) p d', b=B, p=7)
+        
+        spatial_feat = self.spatial_transformer(spatial_feat)  # [B*T, 7, d]
+        
+        time_feat = rearrange(spatial_feat, '(b t) p d-> (b p) t d', b=B, p=7)
+        if self.global_token_mode==0:
+            time_feat = torch.cat([
+                global_time_tokens,
+                time_feat
+            ], dim=1)
+        if motion_mask is not None:
+            motion_mask = motion_mask.to(time_feat.device).bool()
+            time_key_padding_mask = motion_mask.repeat_interleave(7, dim=0)
+            time_feat = self.time_transformer(time_feat, src_key_padding_mask=~time_key_padding_mask)  # [T, B*7, d]
+        else:
+            time_feat = self.time_transformer(time_feat)
+        feature = rearrange(time_feat, '(b p) t d -> b t p d', b=B, p=7)
+
+        global_feat = feature[:, :, 0, :].mean(dim=1)
+        
+        if text is not None:
+            text_feature, text_id = text
+            if text_mask is not None:
+                # text_feature = text_mask['bert_features']
+                input_ids = text_mask['input_ids'].to(motion[0].device)  # [B, seq_len]
+                labels = text_mask['labels'].to(motion[0].device).float()
+                attention_mask = text_mask['attention_mask'].to(motion[0].device).bool()
+                # text_feature_pooler = text_mask['bert_features_pool'].to(parts_feature[0].device).float()
+                with torch.no_grad():
+                    bert_outputs = self.bert_model(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask
+                    )
+                    text_feature = bert_outputs.last_hidden_state.to(motion[0].device).float()
+                    text_feature_pooler = text_mask['feature'].to(motion[0].device).float()
+            text_feature = text_feature.to(motion[0].device).float()
+            # text_feature = self.text_proj(text_feature)
+            motion_feature_global = self.motion_text_proj(global_feat)  # [B, d_model]
+            motion_query = self.motion_all_proj(rearrange(feature, 'b t p d -> b t (p d)'))
+            # 跨模态注意力
+            if motion_mask is not None:
+                attn_output, _ = self.cross_attention(
+                    query=text_feature,
+                    key=motion_query,
+                    value=motion_query,
+                    key_padding_mask=~motion_mask
+                )  # [bs, seq_text, bert_hidden]
+            else:
+                attn_output, _ = self.cross_attention(
+                    query=text_feature,
+                    key=motion_query,
+                    value=motion_query
+                )
+            fused_features = self.temporal_fusion(
+                attn_output,
+                src_key_padding_mask=~attention_mask
+            )  # [bs, seq_text, bert_hidden]
+            # logits = self.mlm_head(fused_features)  # [bs, seq_text, vocab_size]
+            
+            # 计算掩码损失
+            # loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
+            active_loss = (labels != -100).view(-1)
+            active_logits = logits.view(-1, self.vocab_size)[active_loss]
+            active_labels = labels.view(-1)[active_loss]
+            
+        text_feature_pooler = self.text_proj(text_feature_pooler)
+        # 计算相似度矩阵
+        text_feature_pooler = F.normalize(text_feature_pooler, p=2, dim=-1)
+        motion_feature_global = F.normalize(motion_feature_global, p=2, dim=-1)
+        similarity_matrix = torch.matmul(motion_feature_global, text_feature_pooler.transpose(-2, -1))  # [B, T, L]
+        similarity_matrix = similarity_matrix.mean(dim=1)  # [B, L]
+        
+        # 获取Top-K匹配
+        _, topk_indices = torch.topk(similarity_matrix, k=topk, dim=1)  # [B, K]
+        
+        # 计算召回率
+        labels = torch.arange(len(text), device=motion[0].device)
+        batch_size = motion[0].shape[0]  # 添加这行来获取batch_size
+        recall_metrics = {
+            'r1': (topk_indices[:, 0] == labels).float().mean().item(),
+            'r3': (topk_indices[:, :3] == labels.unsqueeze(1)).any(dim=1).float().mean().item(),
+            'r5': (topk_indices == labels.unsqueeze(1)).any(dim=1).float().mean().item()
+        }
+        
+        # 可视化文本匹配结果（仅在Top-1不匹配时输出）
+        if batch_size <= 16:  # 只在小batch size时可视化
+            for i in range(batch_size):
+                if topk_indices[i, 0] != labels[i]:  # 只在Top-1不匹配时输出
+                    print("\n=== 文本匹配可视化（Top-1不匹配） ===")
+                    print(f"\n样本 {i+1}:")
+                    print(f"真值文本: {text[i]}")
+                    print(f"Top-{topk} 匹配文本:")
+                    for j in range(topk):
+                        matched_idx = topk_indices[i, j].item()
+                        similarity = similarity_matrix[i, matched_idx].item()
+                        print(f"  {j+1}. {text[matched_idx]} (相似度: {similarity:.4f})")
+        
+        # MLM任务的召回率计算
+        if text_mask is not None:
+            # 获取掩码位置的标签
+            labels = text_mask['labels'].to(motion[0].device)  # [B, L]
+            active_loss = labels.view(-1) != -100  # [B*L]
+            active_labels = labels.view(-1)[active_loss]  # [active_num]
+            
+            # 计算MLM预测
+            mlm_logits = self.mlm_head(fused_features)  # [B, T, vocab_size]
+            mlm_logits = mlm_logits.view(-1, mlm_logits.size(-1))[active_loss]  # [active_num, vocab_size]
+            
+            # 获取Top-K预测
+            _, topk_indices = torch.topk(mlm_logits, k=topk, dim=1)  # [active_num, K]
+            expanded_labels = active_labels.unsqueeze(1).expand(-1, topk)  # [active_num, K]
+            hits = (topk_indices == expanded_labels)  # [active_num, 5]
+            
+            # 计算MLM召回率
+            r1_mlm = hits[:, 0].sum().float() / active_labels.size(0)
+            r3_mlm = hits[:, :3].sum(dim=1).clamp(max=1).sum().float() / active_labels.size(0)
+            r5_mlm = hits.sum(dim=1).clamp(max=1).sum().float() / active_labels.size(0)
+            
+            recall_metrics.update({
+                'r1_mlm': r1_mlm.item(),
+                'r3_mlm': r3_mlm.item(),
+                'r5_mlm': r5_mlm.item()
+            })
+            
+        
+        return recall_metrics
+
     def forward(self, parts_feature, text=None, text_mask = None, motion_mask=None):
         self.bert_model.to(parts_feature[0].device)
         # 部件特征预处理
@@ -1286,6 +1442,19 @@ class LGVQv5(nn.Module):
         correct_r3 = (topk_indices == labels.unsqueeze(1)).any(dim=1).float().sum().cpu().item()
         correct_r5 = (topk_indices == labels.unsqueeze(1)).any(dim=1).float().sum().cpu().item()
 
+        # 可视化文本匹配结果（仅在Top-1不匹配时输出）
+        if batch_size <= 16:  # 只在小batch size时可视化
+            for i in range(batch_size):
+                if topk_indices[i, 0] != labels[i]:  # 只在Top-1不匹配时输出
+                    print("\n=== 文本匹配可视化（Top-1不匹配） ===")
+                    print(f"\n样本 {i+1}:")
+                    print(f"真值文本: {text[i]}")
+                    print(f"Top-{topk} 匹配文本:")
+                    for j in range(topk):
+                        matched_idx = topk_indices[i, j].item()
+                        similarity = similarity_matrix[i, matched_idx].item()
+                        print(f"  {j+1}. {text[matched_idx]} (相似度: {similarity:.4f})")
+
         # MLM任务的召回率计算
         if text_mask is not None:
             input_ids = text_mask['input_ids'].to(motion[0].device)
@@ -1327,6 +1496,42 @@ class LGVQv5(nn.Module):
             active_labels = active_labels.long()  # [active_num]
             expanded_labels = active_labels.unsqueeze(1).expand(-1, 5)  # [active_num, 5]
             hits = (topk_indices == expanded_labels)  # [active_num, 5]
+            
+            if batch_size <= 16:  # 只在小batch size时可视化
+                num_tmp = 0
+                num_tmp_list = torch.zeros(batch_size, hits.shape[0], dtype=torch.long, device=motion[0].device)
+                for i in range(batch_size):
+                    # 获取原始文本
+                    original_text = bert_tokenizer.decode(input_ids[i], skip_special_tokens=False)
+                    # 获取掩码位置
+                    mask_positions = (labels[i] != -100).nonzero().squeeze(-1)
+                    
+                    if len(mask_positions) == 0:  # 如果没有掩码位置，跳过
+                        continue
+                    # 检查是否有Top-1预测错误的位置
+                    has_error = False
+                    for pos in mask_positions:
+                        num_tmp += 1
+                        num_tmp_list[i][num_tmp - 1] = pos
+                        if not hits[num_tmp-1][0]:  # 检查Top-1是否正确
+                            has_error = True
+                            # break
+                    # 只在有预测错误时输出
+                    if has_error:
+                        print("\n=== MLM预测可视化（Top-1预测错误） ===")
+                        print(f"\n样本 {i+1}:")
+                        print(f"原始文本: {text[i]}")
+                        print(f"mask文本: {original_text.replace(' [PAD]','')}")
+                        print("掩码位置预测:")
+                        for j, pos in enumerate(mask_positions):
+                            # if pos < hits.shape[0]:  # 确保位置有效
+                            index = torch.where(num_tmp_list[i] == pos)[0].item()
+                            top_preds = topk_indices[index]  # [5]
+                            pred_tokens = [bert_tokenizer.decode([idx]) for idx in top_preds]
+                            gt_token = bert_tokenizer.decode([active_labels[index]])
+                            print(f"  位置 {pos}:")
+                            print(f"    真实token: {gt_token}")
+                            print(f"    预测token: {pred_tokens}")
             
             r1_mlm = hits[:, 0].sum().float() / active_labels.size(0)
             r3_mlm = hits[:, :3].sum(dim=1).clamp(max=1).sum().float() / active_labels.size(0)
@@ -1394,8 +1599,6 @@ class LGVQv5(nn.Module):
                     )
                     text_feature = bert_outputs.last_hidden_state.to(parts_feature[0].device).float()
                     text_feature_pooler = text_mask['feature'].to(parts_feature[0].device).float()
-                    
-            # 特征投影
             text_feature = text_feature.to(parts_feature[0].device).float()
             text_query = self.text_proj(text_feature)
             motion_feature_global = self.motion_text_proj(global_feat)
@@ -1872,6 +2075,19 @@ class Dualsem_encoderv2(nn.Module):
         correct_r3 = (topk_indices == labels.unsqueeze(1)).any(dim=1).float().sum().cpu().item()
         correct_r5 = (topk_indices == labels.unsqueeze(1)).any(dim=1).float().sum().cpu().item()
 
+        # 可视化文本匹配结果（仅在Top-1不匹配时输出）
+        if batch_size <= 16:  # 只在小batch size时可视化
+            for i in range(batch_size):
+                if topk_indices[i, 0] != labels[i]:  # 只在Top-1不匹配时输出
+                    print("\n=== 文本匹配可视化（Top-1不匹配） ===")
+                    print(f"\n样本 {i+1}:")
+                    print(f"真值文本: {text[i]}")
+                    print(f"Top-{topk} 匹配文本:")
+                    for j in range(topk):
+                        matched_idx = topk_indices[i, j].item()
+                        similarity = similarity_matrix[i, matched_idx].item()
+                        print(f"  {j+1}. {text[matched_idx]} (相似度: {similarity:.4f})")
+
         # MLM任务的召回率计算
         if text_mask is not None:
             input_ids = text_mask['input_ids'].to(motion[0].device)
@@ -1914,6 +2130,42 @@ class Dualsem_encoderv2(nn.Module):
             expanded_labels = active_labels.unsqueeze(1).expand(-1, 5)  # [active_num, 5]
             hits = (topk_indices == expanded_labels)  # [active_num, 5]
             
+            if batch_size <= 16:  # 只在小batch size时可视化
+                num_tmp = 0
+                num_tmp_list = torch.zeros(batch_size, hits.shape[0], dtype=torch.long, device=motion[0].device)
+                for i in range(batch_size):
+                    # 获取原始文本
+                    original_text = bert_tokenizer.decode(input_ids[i], skip_special_tokens=False)
+                    # 获取掩码位置
+                    mask_positions = (labels[i] != -100).nonzero().squeeze(-1)
+                    
+                    if len(mask_positions) == 0:  # 如果没有掩码位置，跳过
+                        continue
+                    # 检查是否有Top-1预测错误的位置
+                    has_error = False
+                    for pos in mask_positions:
+                        num_tmp += 1
+                        num_tmp_list[i][num_tmp - 1] = pos
+                        if not hits[num_tmp-1][0]:  # 检查Top-1是否正确
+                            has_error = True
+                            # break
+                    # 只在有预测错误时输出
+                    if has_error:
+                        print("\n=== MLM预测可视化（Top-1预测错误） ===")
+                        print(f"\n样本 {i+1}:")
+                        print(f"原始文本: {text[i]}")
+                        print(f"mask文本: {original_text.replace(' [PAD]','')}")
+                        print("掩码位置预测:")
+                        for j, pos in enumerate(mask_positions):
+                            # if pos < hits.shape[0]:  # 确保位置有效
+                            index = torch.where(num_tmp_list[i] == pos)[0].item()
+                            top_preds = topk_indices[index]  # [5]
+                            pred_tokens = [bert_tokenizer.decode([idx]) for idx in top_preds]
+                            gt_token = bert_tokenizer.decode([active_labels[index]])
+                            print(f"  位置 {pos}:")
+                            print(f"    真实token: {gt_token}")
+                            print(f"    预测token: {pred_tokens}")
+            
             r1_mlm = hits[:, 0].sum().float() / active_labels.size(0)
             r3_mlm = hits[:, :3].sum(dim=1).clamp(max=1).sum().float() / active_labels.size(0)
             r5_mlm = hits.sum().float() / active_labels.size(0)
@@ -1950,7 +2202,6 @@ class Dualsem_encoderv2(nn.Module):
         # 空间特征处理
         spatial_feat = rearrange(fused_feat, '(b t) p d-> (b t) p d', b=B, p=7)
         spatial_feat = self.spatial_transformer(spatial_feat)
-        
         # 时间特征处理
         time_feat = rearrange(spatial_feat, '(b t) p d-> (b p) t d', b=B, p=7)
         if motion_mask is not None:
@@ -2245,6 +2496,19 @@ class Dualsem_encoderv3(nn.Module):
         correct_r3 = (topk_indices == labels.unsqueeze(1)).any(dim=1).float().sum().cpu().item()
         correct_r5 = (topk_indices == labels.unsqueeze(1)).any(dim=1).float().sum().cpu().item()
 
+        # 可视化文本匹配结果（仅在Top-1不匹配时输出）
+        if batch_size <= 16:  # 只在小batch size时可视化
+            for i in range(batch_size):
+                if topk_indices[i, 0] != labels[i]:  # 只在Top-1不匹配时输出
+                    print("\n=== 文本匹配可视化（Top-1不匹配） ===")
+                    print(f"\n样本 {i+1}:")
+                    print(f"真值文本: {text[i]}")
+                    print(f"Top-{topk} 匹配文本:")
+                    for j in range(topk):
+                        matched_idx = topk_indices[i, j].item()
+                        similarity = similarity_matrix[i, matched_idx].item()
+                        print(f"  {j+1}. {text[matched_idx]} (相似度: {similarity:.4f})")
+
         # MLM任务的召回率计算
         if text_mask is not None:
             input_ids = text_mask['input_ids'].to(motion[0].device)
@@ -2288,6 +2552,42 @@ class Dualsem_encoderv3(nn.Module):
             expanded_labels = active_labels.unsqueeze(1).expand(-1, 5)  # [active_num, 5]
             hits = (topk_indices == expanded_labels)  # [active_num, 5]
             
+            if batch_size <= 16:  # 只在小batch size时可视化
+                num_tmp = 0
+                num_tmp_list = torch.zeros(batch_size, hits.shape[0], dtype=torch.long, device=motion[0].device)
+                for i in range(batch_size):
+                    # 获取原始文本
+                    original_text = bert_tokenizer.decode(input_ids[i], skip_special_tokens=False)
+                    # 获取掩码位置
+                    mask_positions = (labels[i] != -100).nonzero().squeeze(-1)
+                    
+                    if len(mask_positions) == 0:  # 如果没有掩码位置，跳过
+                        continue
+                    # 检查是否有Top-1预测错误的位置
+                    has_error = False
+                    for pos in mask_positions:
+                        num_tmp += 1
+                        num_tmp_list[i][num_tmp - 1] = pos
+                        if not hits[num_tmp-1][0]:  # 检查Top-1是否正确
+                            has_error = True
+                            # break
+                    # 只在有预测错误时输出
+                    if has_error:
+                        print("\n=== MLM预测可视化（Top-1预测错误） ===")
+                        print(f"\n样本 {i+1}:")
+                        print(f"原始文本: {text[i]}")
+                        print(f"mask文本: {original_text.replace(' [PAD]','')}")
+                        print("掩码位置预测:")
+                        for j, pos in enumerate(mask_positions):
+                            # if pos < hits.shape[0]:  # 确保位置有效
+                            index = torch.where(num_tmp_list[i] == pos)[0].item()
+                            top_preds = topk_indices[index]  # [5]
+                            pred_tokens = [bert_tokenizer.decode([idx]) for idx in top_preds]
+                            gt_token = bert_tokenizer.decode([active_labels[index]])
+                            print(f"  位置 {pos}:")
+                            print(f"    真实token: {gt_token}")
+                            print(f"    预测token: {pred_tokens}")
+            
             r1_mlm = hits[:, 0].sum().float() / active_labels.size(0)
             r3_mlm = hits[:, :3].sum(dim=1).clamp(max=1).sum().float() / active_labels.size(0)
             r5_mlm = hits.sum().float() / active_labels.size(0)
@@ -2308,6 +2608,7 @@ class Dualsem_encoderv3(nn.Module):
             
         # 构建时空特征立方体
         spatial_cube = torch.stack(part_embeds, dim=2)
+        # spatial_cube = self.down_sample(spatial_cube)
         # 数据增强
         if self.training:
             spatial_cube = self.motion_aug(spatial_cube)

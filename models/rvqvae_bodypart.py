@@ -2354,6 +2354,10 @@ class EnhancedVQVAEv11(nn.Module):
         self.d_model = d_model
         if args.lgvq == 5:
             self.lgvq = LGVQv5(args, d_model=d_model, num_layers=args.lglayers, down_sample=args.down_sample if "down_sample" in args else False)
+        elif args.lgvq==6:
+            self.dual = Dualsem_encoderv2(args, num_layers=args.lglayers, d_model=d_model, down_sample=args.down_sample if "down_sample" in args else False)
+        elif args.lgvq==7:
+            self.dual = Dualsem_encoderv3(args, d_model=d_model, down_sample=args.down_sample if "down_sample" in args else False, causal=args.causal if "causal" in args else False)
 
         for idx, name in enumerate(self.parts_name):
             if args.dataname == 't2m':
@@ -2402,6 +2406,7 @@ class EnhancedVQVAEv11(nn.Module):
         loss_list = []
         perplexity_list = []
         x_quantized_list = []
+        x_encoder_list = []
         for idx, name in enumerate(self.parts_name):
             encoder = getattr(self, f'enc_{name}')
             quantizer = getattr(self, f'quantizer_{name}')
@@ -2410,11 +2415,17 @@ class EnhancedVQVAEv11(nn.Module):
             x_encoder = encoder(motion[idx].float().permute(0,2,1))
             x_quantized, loss, perplexity = quantizer(x_encoder)
             x_quantized_list.append(x_quantized.permute(0,2,1))
+            x_encoder_list.append(x_encoder.permute(0,2,1))
             x_decoder = decoder(x_quantized)
             x_out_list.append(rearrange(x_decoder, 'b d t -> b t d'))
             loss_list.append(loss)
             perplexity_list.append(perplexity)
-        if self.lgvq is not None and text_mask is not None:
+        if self.args.lgvq>=6 and text_mask is not None and text_feature is not None:
+            cls_token, loss, commit = self.dual(x_encoder_list, [text_feature, text_id], text_mask, motion_mask)
+            loss_commit, perplexity_sem = commit
+            loss_list.append(loss_commit)
+            perplexity_list.append(perplexity_sem)
+        elif self.args.lgvq>=1 and text_mask is not None and text_feature is not None:
             _, loss = self.lgvq(x_quantized_list, [text_feature, text_id], text_mask, motion_mask)
         else:
             loss = torch.tensor(0.0).to(motion[0].device)
@@ -2782,6 +2793,32 @@ class EnhancedVQVAEv21(nn.Module):
                     code_idx[:, motion_length.item()] = quantizer.nb_code
             code_list.append(code_idx)
         return code_list
+    
+    def text_motion_topk(self, motion, text, motion_mask=None, topk=5, text_mask=None):
+        fused_feat = self.cmt(motion, motion_mask)
+        # 原始编码流程
+        x_encoder_list = []
+        loss_list = []
+        perplexity_list = []
+        x_quantized_list = []
+        for idx, name in enumerate(self.parts_name):
+            quantizer = getattr(self, f'quantizer_{name}')
+            # decoder = getattr(self, f'dec_{name}')
+            x_encoder = fused_feat[idx, ...]
+            x_encoder_list.append(x_encoder)
+            x_quantized, loss, perplexity = quantizer(rearrange(x_encoder, 'b t d -> b d t'))
+            x_quantized_list.append(x_quantized.permute(0,2,1))
+            loss_list.append(loss)
+            perplexity_list.append(perplexity)
+            # x_decoder = decoder(x_quantized)
+            # x_out_list.append(rearrange(x_decoder, 'b d t -> b t d'))
+            # text_feature, text_id, text_mask, motion_mask = text
+        if self.args.lgvq>=6:
+            result = self.dual.text_motion_topk(x_encoder_list, text, motion_mask, topk, text_mask)
+        else:
+            result = self.lgvq.text_motion_topk(x_quantized_list, text, motion_mask, topk, text_mask)
+        return result
+        
 
 class EnhancedVQVAEv22(nn.Module):
     def __init__(self, args,
@@ -3325,6 +3362,9 @@ class HumanVQVAETransformerV21(HumanVQVAETransformer):
 
     def encode(self, motion, motion_mask=None):
         return self.enhancedvqvae.encode(motion, motion_mask)
+    
+    def text_motion_topk(self, motion, text, motion_mask=None, topk=5, text_mask=None):
+        return self.enhancedvqvae.text_motion_topk(motion, text, motion_mask, topk, text_mask)
 
 class HumanVQVAETransformerV22(HumanVQVAETransformer):
     def __init__(self, args, **kwargs):
