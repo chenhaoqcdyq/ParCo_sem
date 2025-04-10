@@ -970,10 +970,10 @@ def cycle(iterable):
 
 
 if __name__ == "__main__":
-    path = "output/00729-t2m-v21/VQVAE-v21-t2m-default"
+    path = "output/00826-t2m-v24_lgvq5_down/VQVAE-v24_lgvq5_down-t2m-default"
     json_file = os.path.join(path, 'train_config.json')
-    # checkpoint_path = os.path.join(path, 'net_last.pth')
-    checkpoint_path = os.path.join(path, 'net_best_fid.pth')
+    checkpoint_path = os.path.join(path, 'net_last.pth')
+    # checkpoint_path = os.path.join(path, 'net_best_fid.pth')
     with open(json_file, 'r') as f:
         train_args_dict = json.load(f)  # dict
     args = EasyDict(train_args_dict) 
@@ -994,13 +994,13 @@ if __name__ == "__main__":
     net.cuda()
     net.eval()
     train_loader = DATALoader(args.dataname,
-                            16,
+                            32,
                             window_size=args.window_size,
                             num_workers=10,
                             unit_length=1)
     train_loader_iter = cycle(train_loader)
     R1, R2 = [], []
-    for i in tqdm(range(5)):
+    for i in tqdm(range(50)):
         batch = next(train_loader_iter)
         if len(batch) == 3:
             gt_parts, text, text_id = batch

@@ -139,7 +139,7 @@ class VQMotionDatasetBodyPart(data.Dataset):
         self.bert_model.eval()  # 冻结BERT参数
         mask_list = [os.path.join(self.text_mask_dir, name + '.json') for name in name_list]
         self.raw_samples = self._load_raw_data(mask_list)
-        self.masker = DynamicMaskGenerator()
+        self.masker = DynamicMaskGenerator(self.bert_tokenizer)
         self.strategy = strategy
         self.static_labels, self.bert_feature = [], []
         # 生成动态标签
@@ -300,17 +300,24 @@ class VQMotionDatasetBodyPart(data.Dataset):
     #                 labels[0][pos] = self.bert_tokenizer.convert_tokens_to_ids(label['word'])
     #     return labels.squeeze()
 
-    def _build_labels(self, encoded: Dict, mask_labels: List) -> torch.Tensor:
+    def _build_labels(self, encoded: Dict, mask_labels: List, masked_length: List) -> torch.Tensor:
         labels = torch.full_like(encoded['input_ids'], -100)
         tokenized = self.bert_tokenizer.convert_ids_to_tokens(encoded['input_ids'][0])
         
         # 生成有效位置映射表（仅首子词）
         position_map = []
+        current_word_pos = 0
         for pos, token in enumerate(tokenized):
             if token in ["[CLS]", "[SEP]"]:
                 continue
-            if not token.startswith("##"):
+            # 如果是首子词或者是mask token，添加到映射表
+            if not token.startswith("##") and token != self.bert_tokenizer.mask_token:
                 position_map.append(pos)
+                current_word_pos += 1
+            # 如果是mask token且长度大于1，说明是分词后的mask
+            elif token == self.bert_tokenizer.mask_token and current_word_pos < len(masked_length) and masked_length[current_word_pos] >= 1:
+                position_map.append(pos)
+                current_word_pos += 1
         
         # 动态映射原始位置到分词后的首子词位置
         for label in mask_labels:
@@ -327,8 +334,8 @@ class VQMotionDatasetBodyPart(data.Dataset):
             # 检查是否为子词的首部分
             if tokenized[bert_pos].startswith("##"):
                 continue  # 理论上此处不会触发，因position_map已过滤
-            
-            labels[0][bert_pos] = self.bert_tokenizer.convert_tokens_to_ids(label['word'])
+            length = len(self.bert_tokenizer.tokenize(label['word']))
+            labels[0][bert_pos:bert_pos+length] = torch.Tensor(self.bert_tokenizer.convert_tokens_to_ids(self.bert_tokenizer.tokenize(label['word']))).long()
         
         return labels.squeeze()
 
@@ -501,7 +508,7 @@ class VQMotionDatasetBodyPart(data.Dataset):
             return_tensors='pt'
         )
         # 构建动态标签
-        labels = self._build_labels(encoded, masked_data['labels'])
+        labels = self._build_labels(encoded, masked_data['labels'], masked_data['masked_length'])
         text_mask = {
             'input_ids': encoded['input_ids'].squeeze(),
             'attention_mask': encoded['attention_mask'].squeeze(),
@@ -519,7 +526,7 @@ class VQMotionDatasetBodyPart(data.Dataset):
 
 class DynamicMaskGenerator:
     def __init__(self, 
-                 mask_prob: float = 0.15,
+                 bert_tokenizer,
                  progressive_stages: List[str] = ['basic', 'medium', 'advanced']):
         self.strategies = {
             'basic': partial(self._mask_core_dir, core_prob=0.5, dir_prob=0.3),
@@ -527,6 +534,7 @@ class DynamicMaskGenerator:
             'advanced': self._full_mask,
             'random': self._random_mask
         }
+        self.bert_tokenizer = bert_tokenizer
         self.mask_token = "[MASK]"
         self.progressive_stages = progressive_stages
         
@@ -540,21 +548,28 @@ class DynamicMaskGenerator:
             masked, new_labels = self.strategies[strategy](words, labels)
         else:
             masked, new_labels = self._random_mask(words, labels)
-        
+        masked_text = words.copy()
+        for i in range(len(masked)):
+            if masked[i] != 0:
+                masked_text[i] = (self.mask_token + " ") * masked[i]
+            if masked[i] > 1:
+                pass
         return {
-            'masked_text': ' '.join(masked),
-            'labels': new_labels
+            'masked_text': ' '.join(masked_text),
+            'labels': new_labels,
+            'masked_length': masked
         }
 
     def _mask_core(self, words, labels, prob=0.3):
         """核心动作掩码"""
-        masked = words.copy()
+        # masked = words.copy()
+        masked = torch.zeros(len(words), dtype=torch.int64)
         new_labels = []
         for word_info in labels:
             if word_info['type'] == 'core' and random.random() < prob:
                 pos = word_info['position']
                 try:
-                    masked[pos] = self.mask_token
+                    masked[pos] = len(self.bert_tokenizer.tokenize(word_info['word']))
                 except:
                     print('pos:', pos)
                     print('len(masked):', len(masked))
@@ -569,7 +584,8 @@ class DynamicMaskGenerator:
             if word_info['type'] == 'dir' and random.random() < dir_prob:
                 pos = word_info['position']
                 try:
-                    masked[pos] = self.mask_token
+                    # masked[pos] = self.mask_token
+                    masked[pos] = len(self.bert_tokenizer.tokenize(word_info['word']))
                 except:
                     print('pos:', pos)
                     print('len(masked):', len(masked))
@@ -583,7 +599,8 @@ class DynamicMaskGenerator:
         for word_info in labels:
             if word_info['type'] == 'body' and random.random() < body_prob:
                 pos = word_info['position']
-                masked[pos] = self.mask_token
+                # masked[pos] = self.mask_token
+                masked[pos] = len(self.bert_tokenizer.tokenize(word_info['word']))
                 new_labels.append(word_info)
         return masked, new_labels
 
@@ -598,7 +615,8 @@ class DynamicMaskGenerator:
         for word_info in labels:
             if random.random() < 0.3:  # 基础概率
                 pos = word_info['position']
-                masked[pos] = self.mask_token
+                # masked[pos] = self.mask_token
+                masked[pos] = len(self.bert_tokenizer.tokenize(word_info['word']))
                 new_labels.append(word_info)
         return masked, new_labels
     

@@ -2304,7 +2304,7 @@ class Dualsem_encoderv3(nn.Module):
         self.ifdown_sample = down_sample
         if down_sample:
             self.time_downsamplers = nn.ModuleList([
-                TemporalDownsamplerHalf(d_model) for _ in range(num_layers)
+                TemporalDownsamplerHalf(d_model, causal=causal) for _ in range(num_layers)
             ])
         else:
             self.time_downsamplers = nn.ModuleList([

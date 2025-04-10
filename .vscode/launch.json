@@ -89,7 +89,7 @@
         "--out-dir=output",
         "--exp-name=train_ParCo_rvq_sem",
         "--dataname=t2m",
-        "--batch-size=64",
+        "--batch-size=16",
         "--print-iter=10",
         "--lr=2e-4",
         "--total-iter=300000",
@@ -105,7 +105,6 @@
         "--vision=11",
         // "--decoder_vision=1",
         // "--num_quantizers=1",
-        // "--causal=True",
         // "--position=1",
         // "--causal=True",
         "--lglayers=1",
@@ -116,8 +115,8 @@
         // "--with_attn=True",
         // "--with_global=0",
         // "--text_dim=768",
-        "--resume-pth=output/00417-t2m-v11/VQVAE-v11-t2m-default/net_best_fid.pth",
-        "--lgvq=0",
+        "--resume-pth=output/00417-t2m-v11/VQVAE-v11-t2m-default/net_last.pth",
+        "--lgvq=7",
         "--down_sample=1",
         "--freeze_encdec=1",
         // "--with_global=0"
@@ -129,7 +128,7 @@
       "env": {
         "PYTHONPATH": "${workspaceFolder}/..:${env:PYTHONPATH}",
         "TORCH_DISTRIBUTED_DEBUG": "INFO",
-        "CUDA_VISIBLE_DEVICES": "1",
+        "CUDA_VISIBLE_DEVICES": "0",
         "TOKENIZERS_PARALLELISM": "false"
       }
     }

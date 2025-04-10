@@ -2357,7 +2357,7 @@ class EnhancedVQVAEv11(nn.Module):
         elif args.lgvq==6:
             self.dual = Dualsem_encoderv2(args, num_layers=args.lglayers, d_model=d_model, down_sample=args.down_sample if "down_sample" in args else False)
         elif args.lgvq==7:
-            self.dual = Dualsem_encoderv3(args, d_model=d_model, down_sample=args.down_sample if "down_sample" in args else False, causal=args.causal if "causal" in args else False)
+            self.dual = Dualsem_encoderv3(args, d_model=d_model, down_sample=args.down_sample if "down_sample" in args else False, causal=True)
 
         for idx, name in enumerate(self.parts_name):
             if args.dataname == 't2m':
@@ -2930,7 +2930,7 @@ class EnhancedVQVAEv24(EnhancedVQVAEv21):
         elif args.lgvq==6:
             self.dual = Dualsem_encoderv2(args, num_layers=args.lglayers, d_model=d_model, down_sample=args.down_sample if "down_sample" in args else False)
         elif args.lgvq==7:
-            self.dual = Dualsem_encoderv3(args, d_model=d_model, down_sample=args.down_sample if "down_sample" in args else False, causal=args.causal if "causal" in args else False)
+            self.dual = Dualsem_encoderv3(args, d_model=d_model, down_sample=args.down_sample if "down_sample" in args else False, causal=args.causal)
     
     def forward(self, motion, text=None):
         if self.args.lgvq>=1 and text is not None and len(text) == 4:

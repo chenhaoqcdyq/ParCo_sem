@@ -254,6 +254,13 @@ if args.ddp:
     train_loader = get_dataloader(train_loader.dataset, args.batch_size, True)
 train_loader_iter = dataset_VQ_bodypart_text.cycle(train_loader)
 
+# if args.lgvq > 0:
+#     val_sem_loader = dataset_VQ_bodypart_text.DATALoader(args.dataname,
+#                             32,
+#                             window_size=args.window_size,
+#                             num_workers=10,
+#                             unit_length=1)
+#     val_sem_iter = dataset_VQ_bodypart_text.cycle(val_sem_loader)
     
 val_loader = dataset_TM_eval_bodypart.DATALoader(args.dataname, False,
                                         32,
@@ -274,7 +281,8 @@ def get_optimizer_params(net, base_lr, vqvae_lr):
     return params
 
 # optimizer_params = get_optimizer_params(net, args.lr, args.lr * 0.1)
-optimizer = optim.AdamW(get_optimizer_params(net, args.lr, args.lr), betas=(0.9, 0.99), weight_decay=args.weight_decay)
+# optimizer = optim.AdamW(get_optimizer_params(net, args.lr, args.lr), betas=(0.9, 0.99), weight_decay=args.weight_decay)
+optimizer = optim.AdamW(net.parameters(), betas=(0.9, 0.99), weight_decay=args.weight_decay)
 
 scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=args.lr_scheduler, gamma=args.gamma)
 Loss = losses.ReConsLossBodyPart(args.recons_loss, args.nb_joints)
