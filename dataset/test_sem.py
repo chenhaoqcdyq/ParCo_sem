@@ -19,6 +19,7 @@ import re
 from utils.misc import EasyDict
 from models import rvqvae_bodypart as vqvae
 
+
 class VQMotionDatasetBodyPart(data.Dataset):
     def __init__(self, dataset_name, window_size=64, unit_length=4, print_warning=False, strategy='basic', with_clip=False, get_vqvae=False):
         self.window_size = window_size
@@ -49,7 +50,12 @@ class VQMotionDatasetBodyPart(data.Dataset):
         self.get_vqvae = get_vqvae
         self.text_mask_dir =  pjoin(self.data_root, 'texts_mask_deepseek')
         self.bert_feature_dir = pjoin(self.data_root, 'texts_bert_feature')
+        if self.with_clip:
+            os.makedirs(self.text_token_dir, exist_ok=True)
+            os.makedirs(self.text_feature_dir, exist_ok=True)
         os.makedirs(self.bert_feature_dir, exist_ok=True)
+        if self.with_clip:
+            clip_model, preprocess = clip.load('ViT-B/32')
         joints_num = self.joints_num
         
         
@@ -78,7 +84,7 @@ class VQMotionDatasetBodyPart(data.Dataset):
                     continue
                 text_data = []
                 text_path = pjoin(self.text_dir, name + '.txt')
-                # text_tokens_path = pjoin(self.text_token_dir, name + '.pth')
+                text_tokens_path = pjoin(self.text_token_dir, name + '.pth')
                 # if os.path.exists(text_path):
                 with cs.open(text_path, 'r') as f:
                     for line in f.readlines():
@@ -86,6 +92,35 @@ class VQMotionDatasetBodyPart(data.Dataset):
                         if len(line_split) > 0:
                             caption = line_split[0]
                             text_data.append(caption)
+                # text_mask_path = pjoin(self.text_mask_dir, name + '.json')
+                # text = ' '.join(text_data)  # 合并所有caption
+                if self.with_clip:
+                    device = clip_model.text_projection.device
+                    self.lengths.append(motion.shape[0] - self.window_size)
+                    if not os.path.exists(text_tokens_path):
+                        text_tokens = clip.tokenize(text_data, truncate = True).to(device)
+                        torch.save(text_tokens, text_tokens_path)
+                    else:
+                        text_tokens = torch.load(text_tokens_path, map_location=torch.device('cpu'))
+                    text_feature_path = pjoin(self.text_feature_dir, name + '.pth')
+                    if not os.path.exists(text_feature_path):
+                        with torch.no_grad():
+                            text_features = clip_model.encode_text(text_tokens)
+                        torch.save(text_features, text_feature_path)
+                        
+                    else:
+                        text_features = torch.load(text_feature_path, map_location=torch.device('cpu'))
+                    name_list.append(name)
+                    self.data.append({
+                    'motion': motion,      # 保持原始运动数据格式
+                    'text': text_data,           # 新增文本信息
+                    'text_token':text_tokens.cpu(),
+                    'text_feature': text_features.cpu(),
+                    'text_feature_all': text_features.cpu(),
+                    # 'text_mask':text_mask_data,
+                    'text_id': name
+                    })
+                else:
                     name_list.append(name)
                     self.data.append({
                     'motion': motion,      # 保持原始运动数据格式
@@ -97,14 +132,19 @@ class VQMotionDatasetBodyPart(data.Dataset):
                 print('Unable to load:', name)
 
         print("Total number of motions {}".format(len(self.data)))
+        # self.get_vqvae_code("output/00762-t2m-v24/VQVAE-v24-t2m-default/net_best_fid.pth","output/00762-t2m-v24/VQVAE-v24-t2m-default/train_config.json")
+        # self.get_vqvae_code("output/00381-t2m-v6/VQVAE-v6-t2m-default/net_best_fid.pth","output/00381-t2m-v6/VQVAE-v6-t2m-default/train_config.json")
+        # self.get_vqvae_code("output/00417-t2m-v11/VQVAE-v11-t2m-default/net_best_fid.pth","output/00417-t2m-v11/VQVAE-v11-t2m-default/train_config.json")
+        # self.get_vqvae_code("output/00729-t2m-v21/VQVAE-v21-t2m-default/net_best_fid.pth","output/00729-t2m-v21/VQVAE-v21-t2m-default/train_config.json")
         self.tokenizer_name = "bert-base-uncased"
+        # self.tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_name)
         self.bert_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
         self.bert_model = BertModel.from_pretrained('bert-base-uncased')
         self.bert_model.cuda()
         self.bert_model.eval()  # 冻结BERT参数
         mask_list = [os.path.join(self.text_mask_dir, name + '.json') for name in name_list]
         self.raw_samples = self._load_raw_data(mask_list)
-        self.masker = DynamicMaskGenerator()
+        self.masker = DynamicMaskGenerator(self.bert_tokenizer)
         self.strategy = strategy
         self.static_labels, self.bert_feature = [], []
         # 生成动态标签
@@ -115,7 +155,6 @@ class VQMotionDatasetBodyPart(data.Dataset):
             # text_feature_tmp.append()
             self.static_labels.append(tmp)
             self.bert_feature.append(self._get_text_features(self.raw_samples[i], self.bert_feature_dir))
-        # self.get_vqvae_code("output/00763-t2m-v24/VQVAE-v24-t2m-default/net_last.pth", "output/00763-t2m-v24/VQVAE-v24-t2m-default/train_args.json")
         del self.bert_model
         
     
@@ -213,17 +252,24 @@ class VQMotionDatasetBodyPart(data.Dataset):
                             })
         return labels
 
-    def _build_labels(self, encoded: Dict, mask_labels: List) -> torch.Tensor:
+    def _build_labels(self, encoded: Dict, mask_labels: List, masked_length: List) -> torch.Tensor:
         labels = torch.full_like(encoded['input_ids'], -100)
         tokenized = self.bert_tokenizer.convert_ids_to_tokens(encoded['input_ids'][0])
         
         # 生成有效位置映射表（仅首子词）
         position_map = []
+        current_word_pos = 0
         for pos, token in enumerate(tokenized):
             if token in ["[CLS]", "[SEP]"]:
                 continue
-            if not token.startswith("##"):
+            # 如果是首子词或者是mask token，添加到映射表
+            if not token.startswith("##") and token != self.bert_tokenizer.mask_token:
                 position_map.append(pos)
+                current_word_pos += 1
+            # 如果是mask token且长度大于1，说明是分词后的mask
+            elif token == self.bert_tokenizer.mask_token and current_word_pos < len(masked_length) and masked_length[current_word_pos] >= 1:
+                position_map.append(pos)
+                current_word_pos += 1
         
         # 动态映射原始位置到分词后的首子词位置
         for label in mask_labels:
@@ -240,8 +286,8 @@ class VQMotionDatasetBodyPart(data.Dataset):
             # 检查是否为子词的首部分
             if tokenized[bert_pos].startswith("##"):
                 continue  # 理论上此处不会触发，因position_map已过滤
-            
-            labels[0][bert_pos] = self.bert_tokenizer.convert_tokens_to_ids(label['word'])
+            length = len(self.bert_tokenizer.tokenize(label['word']))
+            labels[0][bert_pos:bert_pos+length] = torch.Tensor(self.bert_tokenizer.convert_tokens_to_ids(self.bert_tokenizer.tokenize(label['word']))).long()
         
         return labels.squeeze()
 
@@ -319,14 +365,17 @@ class VQMotionDatasetBodyPart(data.Dataset):
             orig_len = len(motion)
             if orig_len < self.max_motion_length:
                 # 不足时padding零（根据motion维度调整pad_width）
-                pad_width = [(0, self.max_motion_length - orig_len)] + [(0,0)] * (motion.ndim-1)
+                pad_width = [(0, self.max_motion_length + 1 - orig_len)] + [(0,0)] * (motion.ndim-1)
                 motion = np.pad(motion, pad_width, mode='constant')
                 # 生成mask（1表示真实数据，0表示padding）
-                motion_mask = np.concatenate([np.ones(orig_len), np.zeros(self.max_motion_length - orig_len)])
+                motion_mask = np.concatenate([np.ones(orig_len), np.zeros(self.max_motion_length + 1 - orig_len)])
             else:
                 # 过长时直接截断
                 motion = motion[:self.max_motion_length]
-                motion_mask = np.ones(self.max_motion_length)
+                # padding = np.pad(motion)
+                pad_width = [(0, 1)] + [(0,0)] * (motion.ndim-1)
+                motion = np.pad(motion, pad_width, mode='constant')
+                motion_mask = np.ones(self.max_motion_length + 1)
             parts = self.whole2parts(motion, mode=self.dataset_name)
             for i in range(len(parts)):
                 parts[i] = parts[i].cuda().float()
@@ -336,7 +385,14 @@ class VQMotionDatasetBodyPart(data.Dataset):
             code_idx = net.encode(parts, motion_mask)
             save_file = os.path.join(save_path, name + '.pth')
             torch.save(code_idx, save_file)
+        # codebook_list = []
+        # codebook_save_path = os.path.join(self.data_root, 'codebook',f'{args.vision}.pth')
+        # for idx, name in enumerate(net.enhancedvqvae.parts_name):
+        #     quantizer = getattr(net.enhancedvqvae, f'quantizer_{name}')
+        #     codebook_list.append(quantizer.codebook)
+        # torch.save(codebook_list, codebook_save_path)
         del net
+        # return save_path
     
     def __getitem__(self, item):
         # motion = self.data[item]
@@ -407,7 +463,7 @@ class VQMotionDatasetBodyPart(data.Dataset):
             return_tensors='pt'
         )
         # 构建动态标签
-        labels = self._build_labels(encoded, masked_data['labels'])
+        labels = self._build_labels(encoded, masked_data['labels'], masked_data['masked_length'])
         text_mask = {
             'input_ids': encoded['input_ids'].squeeze(),
             'attention_mask': encoded['attention_mask'].squeeze(),
@@ -425,7 +481,7 @@ class VQMotionDatasetBodyPart(data.Dataset):
 
 class DynamicMaskGenerator:
     def __init__(self, 
-                 mask_prob: float = 0.15,
+                 bert_tokenizer,
                  progressive_stages: List[str] = ['basic', 'medium', 'advanced']):
         self.strategies = {
             'basic': partial(self._mask_core_dir, core_prob=0.5, dir_prob=0.3),
@@ -433,6 +489,7 @@ class DynamicMaskGenerator:
             'advanced': self._full_mask,
             'random': self._random_mask
         }
+        self.bert_tokenizer = bert_tokenizer
         self.mask_token = "[MASK]"
         self.progressive_stages = progressive_stages
         
@@ -446,21 +503,28 @@ class DynamicMaskGenerator:
             masked, new_labels = self.strategies[strategy](words, labels)
         else:
             masked, new_labels = self._random_mask(words, labels)
-        
+        masked_text = words.copy()
+        for i in range(len(masked)):
+            if masked[i] != 0:
+                masked_text[i] = (self.mask_token + " ") * masked[i]
+            if masked[i] > 1:
+                pass
         return {
-            'masked_text': ' '.join(masked),
-            'labels': new_labels
+            'masked_text': ' '.join(masked_text),
+            'labels': new_labels,
+            'masked_length': masked
         }
 
     def _mask_core(self, words, labels, prob=0.3):
         """核心动作掩码"""
-        masked = words.copy()
+        # masked = words.copy()
+        masked = torch.zeros(len(words), dtype=torch.int64)
         new_labels = []
         for word_info in labels:
             if word_info['type'] == 'core' and random.random() < prob:
                 pos = word_info['position']
                 try:
-                    masked[pos] = self.mask_token
+                    masked[pos] = len(self.bert_tokenizer.tokenize(word_info['word']))
                 except:
                     print('pos:', pos)
                     print('len(masked):', len(masked))
@@ -475,7 +539,8 @@ class DynamicMaskGenerator:
             if word_info['type'] == 'dir' and random.random() < dir_prob:
                 pos = word_info['position']
                 try:
-                    masked[pos] = self.mask_token
+                    # masked[pos] = self.mask_token
+                    masked[pos] = len(self.bert_tokenizer.tokenize(word_info['word']))
                 except:
                     print('pos:', pos)
                     print('len(masked):', len(masked))
@@ -489,7 +554,8 @@ class DynamicMaskGenerator:
         for word_info in labels:
             if word_info['type'] == 'body' and random.random() < body_prob:
                 pos = word_info['position']
-                masked[pos] = self.mask_token
+                # masked[pos] = self.mask_token
+                masked[pos] = len(self.bert_tokenizer.tokenize(word_info['word']))
                 new_labels.append(word_info)
         return masked, new_labels
 
@@ -504,7 +570,8 @@ class DynamicMaskGenerator:
         for word_info in labels:
             if random.random() < 0.3:  # 基础概率
                 pos = word_info['position']
-                masked[pos] = self.mask_token
+                # masked[pos] = self.mask_token
+                masked[pos] = len(self.bert_tokenizer.tokenize(word_info['word']))
                 new_labels.append(word_info)
         return masked, new_labels
     
@@ -942,7 +1009,6 @@ def get_each_part_vel(parts, mode='t2m'):
 
     return parts_vel_list  # [Root_vel, R_Leg_vel, L_Leg_vel, Backbone_vel, R_Arm_vel, L_Arm_vel]
 
-
 def DATALoader(dataset_name,
                batch_size,
                num_workers = 8,
@@ -969,8 +1035,9 @@ def cycle(iterable):
             yield x
 
 
+
 if __name__ == "__main__":
-    path = "output/00826-t2m-v24_lgvq5_down/VQVAE-v24_lgvq5_down-t2m-default"
+    path = "output/00889-t2m-v24_dual3_downlayer1/VQVAE-v24_dual3_downlayer1-t2m-default"
     json_file = os.path.join(path, 'train_config.json')
     checkpoint_path = os.path.join(path, 'net_last.pth')
     # checkpoint_path = os.path.join(path, 'net_best_fid.pth')

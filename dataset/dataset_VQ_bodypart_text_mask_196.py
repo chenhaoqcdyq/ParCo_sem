@@ -413,14 +413,17 @@ class VQMotionDatasetBodyPart(data.Dataset):
             orig_len = len(motion)
             if orig_len < self.max_motion_length:
                 # 不足时padding零（根据motion维度调整pad_width）
-                pad_width = [(0, self.max_motion_length - orig_len)] + [(0,0)] * (motion.ndim-1)
+                pad_width = [(0, self.max_motion_length + 1 - orig_len)] + [(0,0)] * (motion.ndim-1)
                 motion = np.pad(motion, pad_width, mode='constant')
                 # 生成mask（1表示真实数据，0表示padding）
-                motion_mask = np.concatenate([np.ones(orig_len), np.zeros(self.max_motion_length - orig_len)])
+                motion_mask = np.concatenate([np.ones(orig_len), np.zeros(self.max_motion_length + 1 - orig_len)])
             else:
                 # 过长时直接截断
                 motion = motion[:self.max_motion_length]
-                motion_mask = np.ones(self.max_motion_length)
+                # padding = np.pad(motion)
+                pad_width = [(0, 1)] + [(0,0)] * (motion.ndim-1)
+                motion = np.pad(motion, pad_width, mode='constant')
+                motion_mask = np.ones(self.max_motion_length + 1)
             parts = self.whole2parts(motion, mode=self.dataset_name)
             for i in range(len(parts)):
                 parts[i] = parts[i].cuda().float()
