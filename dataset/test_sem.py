@@ -21,7 +21,7 @@ from models import rvqvae_bodypart as vqvae
 
 
 class VQMotionDatasetBodyPart(data.Dataset):
-    def __init__(self, dataset_name, window_size=64, unit_length=4, print_warning=False, strategy='basic', with_clip=False, get_vqvae=False):
+    def __init__(self, dataset_name, window_size=64, unit_length=4, print_warning=False, strategy='basic', with_clip=False,  is_val = True):
         self.window_size = window_size
         self.unit_length = unit_length
         self.dataset_name = dataset_name
@@ -47,7 +47,7 @@ class VQMotionDatasetBodyPart(data.Dataset):
 
             self.max_motion_length = 196
             self.meta_dir = 'checkpoints/kit/Decomp_SP001_SM001_H512/meta'
-        self.get_vqvae = get_vqvae
+        # self.get_vqvae = get_vqvae
         self.text_mask_dir =  pjoin(self.data_root, 'texts_mask_deepseek')
         self.bert_feature_dir = pjoin(self.data_root, 'texts_bert_feature')
         if self.with_clip:
@@ -63,8 +63,10 @@ class VQMotionDatasetBodyPart(data.Dataset):
         std = np.load(pjoin(self.meta_dir, 'std.npy'))
         self.mean = mean
         self.std = std
-
-        split_file = pjoin(self.data_root, 'val.txt')
+        if is_val:
+            split_file = pjoin(self.data_root, 'val.txt')
+        else:
+            split_file = pjoin(self.data_root, 'train.txt')
 
         self.data = []
         self.lengths = []
@@ -73,7 +75,7 @@ class VQMotionDatasetBodyPart(data.Dataset):
             for line in f.readlines():
                 id_list.append(line.strip())
 
-        
+        self.IS_TARFILE = False
         name_list = []
         for name in tqdm(id_list):
             try:
@@ -133,9 +135,9 @@ class VQMotionDatasetBodyPart(data.Dataset):
 
         print("Total number of motions {}".format(len(self.data)))
         # self.get_vqvae_code("output/00762-t2m-v24/VQVAE-v24-t2m-default/net_best_fid.pth","output/00762-t2m-v24/VQVAE-v24-t2m-default/train_config.json")
-        # self.get_vqvae_code("output/00381-t2m-v6/VQVAE-v6-t2m-default/net_best_fid.pth","output/00381-t2m-v6/VQVAE-v6-t2m-default/train_config.json")
+        self.get_vqvae_code("output/00889-t2m-v24_dual3_downlayer1/VQVAE-v24_dual3_downlayer1-t2m-default/net_best_fid.pth","output/00889-t2m-v24_dual3_downlayer1/VQVAE-v24_dual3_downlayer1-t2m-default/train_config.json", is_val=is_val)
         # self.get_vqvae_code("output/00417-t2m-v11/VQVAE-v11-t2m-default/net_best_fid.pth","output/00417-t2m-v11/VQVAE-v11-t2m-default/train_config.json")
-        # self.get_vqvae_code("output/00729-t2m-v21/VQVAE-v21-t2m-default/net_best_fid.pth","output/00729-t2m-v21/VQVAE-v21-t2m-default/train_config.json")
+        # self.get_vqvae_code("output/00417-t2m-v11/VQVAE-v11-t2m-default/net_best_fid.pth","output/00417-t2m-v11/VQVAE-v11-t2m-default/train_config.json", is_val=is_val)
         self.tokenizer_name = "bert-base-uncased"
         # self.tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_name)
         self.bert_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
@@ -318,7 +320,7 @@ class VQMotionDatasetBodyPart(data.Dataset):
     def set_stage(self, stage):
         self.strategy = stage
     
-    def get_vqvae_code(self, net_path, json_file):
+    def get_vqvae_code(self, net_path, json_file, is_val=False):
         from utils.misc import EasyDict
         from models import rvqvae_bodypart as vqvae
         from models import vqvae_bodypart
@@ -355,8 +357,15 @@ class VQMotionDatasetBodyPart(data.Dataset):
         net.load_state_dict(ckpt['net'], strict=True)
         net.cuda()
         net.eval()
-        save_path = os.path.join(self.data_root, f'vqvae_code{args.vision}_val') if 'vision' in args else os.path.join(self.data_root, 'vqvae_code_parco')
+        if is_val:
+            val_text = "val"
+        else:
+            val_text = "train"
+        if 'lgvq' not in args:
+            args.lgvq = 0
+        save_path = os.path.join(self.data_root, f'vqvae_code{args.vision}_lg{args.lgvq}_{val_text}') if 'vision' in args else os.path.join(self.data_root, 'vqvae_code_parco')
         os.makedirs(save_path, exist_ok=True)
+        print('save_path:', save_path)
         for i in tqdm(range(len(self.data))):
             data = self.data[i]
             motion = data['motion']
@@ -383,8 +392,17 @@ class VQMotionDatasetBodyPart(data.Dataset):
                     parts[i] = parts[i].unsqueeze(0)
             motion_mask = torch.from_numpy(motion_mask).unsqueeze(0).cuda().bool()
             code_idx = net.encode(parts, motion_mask)
-            save_file = os.path.join(save_path, name + '.pth')
-            torch.save(code_idx, save_file)
+            save_file = os.path.join(save_path, name)
+            text = data['text']
+            # torch.save(code_idx, save_file)
+            # code_idx = [code_idx[i].cpu().numpy() for i in range(len(code_idx))]
+            for idx, name in enumerate(net.enhancedvqvae.parts_name):
+                setattr(self, f'{name}_code_idx', code_idx[idx].cpu().numpy())
+            np.savez(
+                save_file,
+                **{name: getattr(self, f'{name}_code_idx') for name in net.enhancedvqvae.parts_name},
+                text=text
+            )
         # codebook_list = []
         # codebook_save_path = os.path.join(self.data_root, 'codebook',f'{args.vision}.pth')
         # for idx, name in enumerate(net.enhancedvqvae.parts_name):
@@ -397,11 +415,19 @@ class VQMotionDatasetBodyPart(data.Dataset):
     def __getitem__(self, item):
         # motion = self.data[item]
         data = self.data[item]
+        if not self.IS_TARFILE:
+            for i in range(len(self.data)):
+                data_tmp = self.data[i]
+                # motion = data['motion']
+                text_id = data_tmp['text_id']
+                if text_id == "009133":
+                    data = data_tmp
+                    self.IS_TARFILE = True
+                    item = i
+                    break
         motion = data['motion']
-        text_list = data['text']
-        
         text_id = data['text_id']
-        
+        text_list = data['text']
         text_random_id = random.randint(0, len(text_list) - 1)
         text = text_list[text_random_id]
         if self.with_clip:
@@ -1013,9 +1039,10 @@ def DATALoader(dataset_name,
                batch_size,
                num_workers = 8,
                window_size = 64,
-               unit_length = 4):
+               unit_length = 4,
+               is_val = True):
     
-    trainSet = VQMotionDatasetBodyPart(dataset_name, window_size=window_size, unit_length=unit_length)
+    trainSet = VQMotionDatasetBodyPart(dataset_name, window_size=window_size, unit_length=unit_length, is_val=is_val)
     prob = trainSet.compute_sampling_prob()
     sampler = torch.utils.data.WeightedRandomSampler(prob, num_samples = len(trainSet) * 1000, replacement=True)
     train_loader = torch.utils.data.DataLoader(trainSet,
@@ -1061,13 +1088,14 @@ if __name__ == "__main__":
     net.cuda()
     net.eval()
     train_loader = DATALoader(args.dataname,
-                            32,
+                            16,
                             window_size=args.window_size,
                             num_workers=10,
-                            unit_length=1)
+                            unit_length=1,
+                            is_val=True)
     train_loader_iter = cycle(train_loader)
     R1, R2 = [], []
-    for i in tqdm(range(50)):
+    for i in tqdm(range(1)):
         batch = next(train_loader_iter)
         if len(batch) == 3:
             gt_parts, text, text_id = batch

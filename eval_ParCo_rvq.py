@@ -6,7 +6,7 @@ import torch
 from torch.utils.tensorboard import SummaryWriter
 import numpy as np
 
-import models.rvqvae_bodypart as vqvae
+import models.vqvae_bodypart as vqvae
 from models.evaluator_wrapper import EvaluatorModelWrapper
 from dataset import dataset_TM_eval_bodypart
 
@@ -56,7 +56,7 @@ with open(test_args.training_options_path, 'r') as f:
     train_args_dict = json.load(f)  # dict
 train_args = EasyDict(train_args_dict)  # convert dict to easydict for convenience
 test_args.train_args = train_args  # save train_args into test_args for logging convenience
-args = train_args
+
 
 ##### ---- Logger ---- #####
 logger = utils_model.get_logger(test_args.test_dir )
@@ -80,18 +80,19 @@ val_loader = dataset_TM_eval_bodypart.DATALoader(
 
 ##### ---- Network ---- #####
 print('\n\n===> Constructing network...')
-net = getattr(vqvae, f'HumanVQVAETransformerV{args.vision}')(args,  # use args to define different parameters in different quantizers
-        parts_code_nb=args.vqvae_arch_cfg['parts_code_nb'],
-        parts_code_dim=args.vqvae_arch_cfg['parts_code_dim'],
-        parts_output_dim=args.vqvae_arch_cfg['parts_output_dim'],
-        parts_hidden_dim=args.vqvae_arch_cfg['parts_hidden_dim'],
-        down_t=args.down_t,
-        stride_t=args.stride_t,
-        depth=args.depth,
-        dilation_growth_rate=args.dilation_growth_rate,
-        activation=args.vq_act,
-        norm=args.vq_norm
-    )    
+net = vqvae.HumanVQVAEBodyPart(
+    train_args,  # use args to define different parameters in different quantizers
+    train_args['vqvae_arch_cfg']['parts_code_nb'],
+    train_args['vqvae_arch_cfg']['parts_code_dim'],
+    train_args['vqvae_arch_cfg']['parts_output_dim'],
+    train_args['vqvae_arch_cfg']['parts_hidden_dim'],
+    train_args['down_t'],
+    train_args['stride_t'],
+    train_args['depth'],
+    train_args['dilation_growth_rate'],
+    train_args['vq_act'],
+    train_args['vq_norm']
+)
 
 
 #### Loading weights #####
@@ -112,6 +113,7 @@ top1 = []
 top2 = []
 top3 = []
 matching = []
+mpjpe = []
 repeat_time = 20
 print('\n===> Start testing...')
 for i in range(repeat_time):
@@ -128,6 +130,7 @@ for i in range(repeat_time):
     top2.append(best_top2)
     top3.append(best_top3)
     matching.append(best_matching)
+    mpjpe.append(best_mpjpe)
 
 print('\n\nfinal result:')
 print('fid: ', sum(fid)/repeat_time)
@@ -136,6 +139,7 @@ print('top1: ', sum(top1)/repeat_time)
 print('top2: ', sum(top2)/repeat_time)
 print('top3: ', sum(top3)/repeat_time)
 print('matching: ', sum(matching)/repeat_time)
+print('mpjpe: ', sum(mpjpe)/repeat_time)
 
 fid = np.array(fid)
 div = np.array(div)
@@ -143,5 +147,6 @@ top1 = np.array(top1)
 top2 = np.array(top2)
 top3 = np.array(top3)
 matching = np.array(matching)
-msg_final = f"FID. {np.mean(fid):.3f}, conf. {np.std(fid)*1.96/np.sqrt(repeat_time):.3f}, Diversity. {np.mean(div):.3f}, conf. {np.std(div)*1.96/np.sqrt(repeat_time):.3f}, TOP1. {np.mean(top1):.3f}, conf. {np.std(top1)*1.96/np.sqrt(repeat_time):.3f}, TOP2. {np.mean(top2):.3f}, conf. {np.std(top2)*1.96/np.sqrt(repeat_time):.3f}, TOP3. {np.mean(top3):.3f}, conf. {np.std(top3)*1.96/np.sqrt(repeat_time):.3f}, Matching. {np.mean(matching):.3f}, conf. {np.std(matching)*1.96/np.sqrt(repeat_time):.3f}"
+mpjpe = np.array(mpjpe)
+msg_final = f"FID. {np.mean(fid):.3f}, conf. {np.std(fid)*1.96/np.sqrt(repeat_time):.3f}, Diversity. {np.mean(div):.3f}, conf. {np.std(div)*1.96/np.sqrt(repeat_time):.3f}, TOP1. {np.mean(top1):.3f}, conf. {np.std(top1)*1.96/np.sqrt(repeat_time):.3f}, TOP2. {np.mean(top2):.3f}, conf. {np.std(top2)*1.96/np.sqrt(repeat_time):.3f}, TOP3. {np.mean(top3):.3f}, conf. {np.std(top3)*1.96/np.sqrt(repeat_time):.3f}, Matching. {np.mean(matching):.3f}, conf. {np.std(matching)*1.96/np.sqrt(repeat_time):.3f} MPJPE. {np.mean(mpjpe):.3f}, conf. {np.std(mpjpe)*1.96/np.sqrt(repeat_time):.3f}"
 logger.info(msg_final)

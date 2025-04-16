@@ -8,7 +8,11 @@ import numpy as np
 import torch
 from scipy import linalg
 
+# import visualize.plot_3d_global as plot_3d
+import sys, os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import visualize.plot_3d_global as plot_3d
+# from dataset.dataset_VQ_bodypart import parts2whole
 from utils.motion_process import recover_from_ric
 
 
@@ -306,6 +310,7 @@ def evaluation_transformer_batch(out_dir, val_loader, net, trans, logger, writer
                         parts_index_motion[j] = torch.ones(1,1).cuda().long()  # (B, seq_len) B==1, seq_len==1
                     else:
                         parts_index_motion[j] = parts_index_motion[j][:,:min_motion_seq_len]
+
 
 
                 '''
@@ -774,3 +779,371 @@ def calculate_frechet_feature_distance(feature_list1, feature_list2):
         sigma2=np.cov(feature_list2, rowvar=False),
     )
     return dist
+
+def calculate_motion_metrics(code_indices, eval_wrapper, top_k=3, save_path=None):
+    """
+    计算预测动作的评估指标
+    
+    Args:
+        code_indices: 编码索引字典，每个元素是一个动作序列
+        eval_wrapper: 评估包装器，用于计算动作嵌入
+        top_k: 计算top-k准确率时的k值
+        
+    Returns:
+        dict: 包含各项评估指标的字典
+    """
+    # 初始化指标
+    metrics = {
+        'diversity': 0.0,
+        'top_k_accuracy': [0.0] * top_k,
+        'matching_score': 0.0,
+        'mpjpe': 0.0
+    }
+    
+    # 将预测动作转换为numpy数组
+    pred_motions = [code_indices[name]['decoded_motion'] for name in code_indices]
+    word_embeddings = [code_indices[name]['word_embeddings'] for name in code_indices]
+    pos_one_hots = [code_indices[name]['pos_one_hots'] for name in code_indices]
+    caption = [code_indices[name]['caption'] for name in code_indices]
+    sent_len = [code_indices[name]['sent_len'] for name in code_indices]
+    mean = torch.from_numpy(np.load('./dataset/HumanML3D/Mean.npy')).cuda()
+    std = torch.from_numpy(np.load('./dataset/HumanML3D/Std.npy')).cuda()
+    # 计算动作嵌入
+    pred_embeddings = []
+    et_pred_list = []
+    em_pred_list = []
+    
+    for i in range(len(pred_motions)):
+        # 确保m_length是一个标量值，而不是张量
+        m_length = pred_motions[i].shape[1]
+            
+        # 计算动作嵌入
+        et_pred, em_pred = eval_wrapper.get_co_embeddings(
+            word_embeddings[i].unsqueeze(0), 
+            pos_one_hots[i].unsqueeze(0), 
+            torch.tensor([sent_len[i]], dtype=torch.int64).to(pred_motions[i].device), 
+            pred_motions[i], 
+            torch.tensor([m_length], dtype=torch.int64).to(pred_motions[i].device))
+        pred_embeddings.append(em_pred)
+        et_pred_list.append(et_pred)
+        em_pred_list.append(em_pred)
+    et_pred = torch.cat(et_pred_list, dim=0).cpu()
+    em_pred = torch.cat(em_pred_list, dim=0).cpu()
+    pred_embeddings = torch.cat(pred_embeddings, dim=0).cpu().numpy()
+    # 计算多样性
+    metrics['diversity'] = calculate_diversity(pred_embeddings, 300 if len(pred_embeddings) > 300 else 100)
+    # 计算top-k准确率和匹配分数
+    # 这里我们使用预测动作之间的相似度来计算
+    # dist_mat = euclidean_distance_matrix(pred_embeddings, pred_embeddings)
+    batch = 32
+    R_precision_list = []
+    matching_score_pred_list = []
+    for i in range(len(pred_motions)//batch):
+        R_precision, matching_score_pred = calculate_R_precision(et_pred[i*batch:(i+1)*batch].cpu().numpy(), em_pred[i*batch:(i+1)*batch].cpu().numpy(), top_k=3, sum_all=True)
+        # print(R_precision, matching_score_pred)
+        R_precision_list.append(R_precision)
+        matching_score_pred_list.append(matching_score_pred)
+    R_precision = sum(R_precision_list) / len(R_precision_list)
+    matching_score_pred = sum(matching_score_pred_list) / len(matching_score_pred_list)
+    # R_precision += temp_R
+    # matching_score_pred += temp_match
+    # matching_score = dist_mat.trace()
+    # argmax = np.argsort(dist_mat, axis=1)
+    # top_k_mat = calculate_top_k(argmax, top_k)
+    metrics['top_k_accuracy'] = R_precision / batch
+    metrics['matching_score'] = matching_score_pred / batch
+    
+    # # 计算MPJPE (Mean Per Joint Position Error)
+    # # 这里我们计算相邻帧之间的MPJPE
+    # total_mpjpe = 0
+    # count = 0
+    # for i in range(len(pred_motions)):
+    #     if pred_motions[i].shape[0] > 1:  # 确保有足够的帧数
+    #         # 计算相邻帧之间的MPJPE
+    #         mpjpe = calculate_mpjpe(pred_motions[i][:-1], pred_motions[i][1:])
+    #         total_mpjpe += mpjpe.sum().item()
+    #         count += mpjpe.shape[0]
+    
+    # if count > 0:
+    #     metrics['mpjpe'] = total_mpjpe / count
+    
+    if save_path is not None:
+        infer_out_dir = os.path.join("/workspace/motion_diffusion/ParCo/dataset/HumanML3D/gen", os.path.basename(save_path), 'infer_out')
+        os.makedirs(infer_out_dir, exist_ok=True)
+        for i in range(len(pred_motions)):  
+            pred_xyz = recover_from_ric((pred_motions[i]*std + mean).float(), 22)
+            xyz = pred_xyz.reshape(1, -1, 22, 3)
+            npy_save_dir = os.path.join(infer_out_dir, f'{i}_motion.npy')
+            gif_save_dir = os.path.join(infer_out_dir, f'{i}_skeleton_viz.gif')
+            np.save(npy_save_dir, xyz.detach().cpu().numpy())
+            pose_vis = plot_3d.draw_to_batch(xyz.detach().cpu().numpy(), caption[i], [gif_save_dir])
+        # metrics['mpjpe'] += calculate_mpjpe(xyz, pred_motions[i]) 
+    
+    return metrics
+
+class CodeIndexEvaluator:
+    """
+    用于读取编码索引文件，解码动作并评估的类
+    """
+    def __init__(self, net, eval_wrapper, val_loader, dataset_name='t2m', device='cuda'):
+        """
+        初始化评估器
+        
+        Args:
+            net: 预训练的VQ-VAE网络
+            eval_wrapper: 评估包装器，用于计算动作嵌入
+            dataset_name: 数据集名称，默认为't2m'
+            device: 计算设备，默认为'cuda'
+        """
+        self.net = net
+        self.eval_wrapper = eval_wrapper
+        self.dataset_name = dataset_name
+        self.device = device
+        self.net.to(device)
+        self.net.eval()
+        self.parts_name = ['Root', 'R_Leg', 'L_Leg', 'Backbone', 'R_Arm', 'L_Arm']
+        self.val_loader = val_loader
+        
+    def load_code_indices(self, code_dir):
+        """
+        加载指定目录中的所有编码索引文件
+        
+        Args:
+            code_dir: 编码索引文件所在的目录
+            
+        Returns:
+            dict: 文件名到编码索引的映射
+        """
+        code_indices = {}
+        for filename in os.listdir(code_dir):
+            if filename.endswith('.npy') or filename.endswith('.npz'):
+                code_tmp = {}
+                file_path = os.path.join(code_dir, filename)
+                name = os.path.splitext(filename)[0]
+                if filename.endswith('.npy'):
+                    code_index = np.load(file_path)
+                else:
+                    # code_index = np.load(file_path)['arr_0']
+                    data = np.load(file_path)
+                    code_index = [data[part] for part in self.parts_name]
+                    code_index = np.concatenate(code_index, axis=0)
+                # code_indices[name] = code_index
+                code_tmp['code_index'] = code_index
+                # code_tmp['name'] = data['motion']
+                # code_tmp['text'] = data['text']
+                code_indices[name] = code_tmp
+        
+        for batch in self.val_loader:
+            word_embeddings, pos_one_hots, caption, sent_len, motion, m_length, token, names, parts = batch
+            for i in range(len(names)):
+                name = names[i]
+                if name in code_indices.keys():
+                    code_indices[name]['word_embeddings'] = word_embeddings[i]
+                    code_indices[name]['pos_one_hots'] = pos_one_hots[i]
+                    code_indices[name]['caption'] = caption[i]
+                    code_indices[name]['sent_len'] = sent_len[i]
+                    code_indices[name]['motion'] = motion[i]
+                    code_indices[name]['m_length'] = m_length[i]
+                    code_indices[name]['token'] = token[i]
+                    # code_indices[name]['parts'] = parts[i]
+                    
+        new_code_indices = {}
+        for name in code_indices:
+            if 'word_embeddings' in code_indices[name].keys():
+                new_code_indices[name] = code_indices[name]
+        del code_indices
+        return new_code_indices
+    
+    def decode_motions(self, code_indices):
+        """
+        使用网络解码编码索引为动作
+        
+        Args:
+            code_indices: 编码索引字典
+            
+        Returns:
+            dict: 文件名到解码后动作的映射
+        """
+        # decoded_motions = []
+        # text_list = []
+        for name in code_indices:
+            with torch.no_grad():
+                # 解码动作
+                decoded_parts = self.net.decode(code_indices[name]['code_index'])
+                # 将部分动作转换为完整动作
+                decoded_motion = self._parts2whole(decoded_parts)
+                code_indices[name]['decoded_motion'] = decoded_motion
+                # text_list.append(code_indices[name]['text'])
+        return code_indices
+    
+    def _parts2whole(self, parts):
+        """
+        将部分动作转换为完整动作
+        
+        Args:
+            parts: 部分动作列表
+            
+        Returns:
+            torch.Tensor: 完整动作
+        """
+        # 使用数据集中的parts2whole函数
+        from dataset.dataset_VQ_bodypart_text_mask_196 import parts2whole
+        return parts2whole(parts, mode=self.dataset_name)
+    
+    def evaluate_motions(self, code_indices):
+        """
+        评估解码后的动作
+        
+        Args:
+            decoded_motions: 解码后的动作字典
+            
+        Returns:
+            dict: 评估指标
+        """
+        # 将动作转换为列表
+        # motion_list = [code_indices[name]['decoded_motion'] for name in code_indices]
+        
+        # 计算评估指标
+        metrics = calculate_motion_metrics(code_indices, self.eval_wrapper, save_path=self.path)
+        
+        return metrics
+    
+    def evaluate_code_directory(self, code_dir):
+        """
+        评估指定目录中的所有编码索引文件
+        
+        Args:
+            code_dir: 编码索引文件所在的目录
+            
+        Returns:
+            dict: 评估指标
+        """
+        self.path = code_dir
+        # 加载编码索引
+        code_indices = self.load_code_indices(code_dir)
+        
+        # 解码动作
+        code_indices = self.decode_motions(code_indices)
+        
+        # 评估动作
+        metrics = self.evaluate_motions(code_indices)
+        
+        return metrics
+
+if __name__ == "__main__":
+    import os
+    import json
+    import argparse
+
+    import torch
+    from torch.utils.tensorboard import SummaryWriter
+    import numpy as np
+
+    import models.rvqvae_bodypart as vqvae
+    from models.evaluator_wrapper import EvaluatorModelWrapper
+    from dataset import dataset_TM_eval_bodypart
+
+    import options.option_vq_bodypart as option_vq
+    from options.get_eval_option import get_opt
+
+    import utils.utils_model as utils_model
+    import utils.eval_bodypart as eval_bodypart
+    from utils.word_vectorizer import WordVectorizer
+    from utils.misc import EasyDict
+    test_args = option_vq.get_vavae_test_args_parser()
+    test_args.select_vqvae_ckpt = 'last'
+    test_args.vqvae_train_dir = 'output/00889-t2m-v24_dual3_downlayer1/VQVAE-v24_dual3_downlayer1-t2m-default'
+    select_ckpt = test_args.select_vqvae_ckpt
+    assert select_ckpt in [
+        'last',  # last  saved ckpt
+        'fid',  # best FID ckpt
+        'div',  # best diversity ckpt
+        'top1',  # best top-1 R-precision
+        'matching',  # MM-Dist: Multimodal Distance
+    ]
+
+
+    vqvae_train_dir = test_args.vqvae_train_dir
+
+    # Checkpoint path
+    if select_ckpt == 'last':
+        test_args.ckpt_path = os.path.join(vqvae_train_dir, 'net_' + select_ckpt + '.pth')
+    else:
+        test_args.ckpt_path = os.path.join(vqvae_train_dir, 'net_best_' + select_ckpt + '.pth')
+
+    # Prepare testing directory
+    test_args.test_dir = os.path.join(vqvae_train_dir, 'test_vqvae-' + select_ckpt)
+    test_args.test_npy_save_dir = os.path.join(test_args.test_dir, 'saved_npy')
+    os.makedirs(test_args.test_dir, exist_ok=True)
+    os.makedirs(test_args.test_npy_save_dir, exist_ok=True)
+
+    # Load the config of vqvae training
+    print('\nLoading training argument...\n')
+    test_args.training_options_path = os.path.join(vqvae_train_dir, 'train_config.json')
+    with open(test_args.training_options_path, 'r') as f:
+        train_args_dict = json.load(f)  # dict
+    train_args = EasyDict(train_args_dict)  # convert dict to easydict for convenience
+    test_args.train_args = train_args  # save train_args into test_args for logging convenience
+    args = train_args
+
+    ##### ---- Logger ---- #####
+    logger = utils_model.get_logger(test_args.test_dir )
+    writer = SummaryWriter(test_args.test_dir )
+    logger.info(json.dumps(vars(test_args), indent=4, sort_keys=True))
+
+
+    w_vectorizer = WordVectorizer('./glove', 'our_vab')
+
+    dataset_opt_path = 'checkpoints/kit/Comp_v6_KLD005/opt.txt' if train_args.dataname == 'kit' else 'checkpoints/t2m/Comp_v6_KLD01/opt.txt'
+
+    wrapper_opt = get_opt(dataset_opt_path, torch.device('cuda'))
+    eval_wrapper = EvaluatorModelWrapper(wrapper_opt)
+
+
+    ##### ---- Dataloader ---- #####
+
+    val_loader = dataset_TM_eval_bodypart.DATALoader(
+        train_args.dataname, False, 32, w_vectorizer, unit_length=2**train_args.down_t)
+
+
+    ##### ---- Network ---- #####
+    print('\n\n===> Constructing network...')
+    net = getattr(vqvae, f'HumanVQVAETransformerV{args.vision}')(args,  # use args to define different parameters in different quantizers
+            parts_code_nb=args.vqvae_arch_cfg['parts_code_nb'],
+            parts_code_dim=args.vqvae_arch_cfg['parts_code_dim'],
+            parts_output_dim=args.vqvae_arch_cfg['parts_output_dim'],
+            parts_hidden_dim=args.vqvae_arch_cfg['parts_hidden_dim'],
+            down_t=args.down_t,
+            stride_t=args.stride_t,
+            depth=args.depth,
+            dilation_growth_rate=args.dilation_growth_rate,
+            activation=args.vq_act,
+            norm=args.vq_norm
+        )    
+
+
+    #### Loading weights #####
+    print('\n\n===> Loading weights...')
+    if test_args.ckpt_path:
+        logger.info('loading checkpoint from {}'.format(test_args.ckpt_path))
+        ckpt = torch.load(test_args.ckpt_path, map_location='cpu')
+        net.load_state_dict(ckpt['net'], strict=True)
+    else:
+        raise Exception('You need to specify the ckpt path!')
+
+    net.cuda()
+    net.eval()
+
+    fid = []
+    div = []
+    top1 = []
+    top2 = []
+    top3 = []
+    matching = []
+    repeat_time = 20
+    # 初始化评估器
+    evaluator = CodeIndexEvaluator(net, eval_wrapper, val_loader)
+    code_dir = "/workspace/motion_diffusion/ParCo/dataset/HumanML3D/vqvae_code24_lg7_val"
+    # 评估指定目录中的所有编码索引文件
+    metrics = evaluator.evaluate_code_directory(code_dir)
+    print(metrics)

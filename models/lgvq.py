@@ -1445,15 +1445,15 @@ class LGVQv5(nn.Module):
         # 可视化文本匹配结果（仅在Top-1不匹配时输出）
         if batch_size <= 16:  # 只在小batch size时可视化
             for i in range(batch_size):
-                if topk_indices[i, 0] != labels[i]:  # 只在Top-1不匹配时输出
-                    print("\n=== 文本匹配可视化（Top-1不匹配） ===")
-                    print(f"\n样本 {i+1}:")
-                    print(f"真值文本: {text[i]}")
-                    print(f"Top-{topk} 匹配文本:")
-                    for j in range(topk):
-                        matched_idx = topk_indices[i, j].item()
-                        similarity = similarity_matrix[i, matched_idx].item()
-                        print(f"  {j+1}. {text[matched_idx]} (相似度: {similarity:.4f})")
+                # if topk_indices[i, 0] != labels[i]:  # 只在Top-1不匹配时输出
+                    # print("\n=== 文本匹配可视化（Top-1不匹配） ===")
+                print(f"\n样本 {i+1}:")
+                print(f"真值文本: {text[i]}")
+                print(f"Top-{topk} 匹配文本:")
+                for j in range(topk):
+                    matched_idx = topk_indices[i, j].item()
+                    similarity = similarity_matrix[i, matched_idx].item()
+                    print(f"  {j+1}. {text[matched_idx]} (相似度: {similarity:.4f})")
 
         # MLM任务的召回率计算
         if text_mask is not None:
@@ -2499,15 +2499,15 @@ class Dualsem_encoderv3(nn.Module):
         # 可视化文本匹配结果（仅在Top-1不匹配时输出）
         if batch_size <= 16:  # 只在小batch size时可视化
             for i in range(batch_size):
-                if topk_indices[i, 0] != labels[i]:  # 只在Top-1不匹配时输出
-                    print("\n=== 文本匹配可视化（Top-1不匹配） ===")
-                    print(f"\n样本 {i+1}:")
-                    print(f"真值文本: {text[i]}")
-                    print(f"Top-{topk} 匹配文本:")
-                    for j in range(topk):
-                        matched_idx = topk_indices[i, j].item()
-                        similarity = similarity_matrix[i, matched_idx].item()
-                        print(f"  {j+1}. {text[matched_idx]} (相似度: {similarity:.4f})")
+                # if topk_indices[i, 0] != labels[i]:  # 只在Top-1不匹配时输出
+                #     print("\n=== 文本匹配可视化（Top-1不匹配） ===")
+                print(f"\n样本 {i+1}:")
+                print(f"真值文本: {text[i]}")
+                print(f"Top-{topk} 匹配文本:")
+                for j in range(topk):
+                    matched_idx = topk_indices[i, j].item()
+                    similarity = similarity_matrix[i, matched_idx].item()
+                    print(f"  {j+1}. {text[matched_idx]} (相似度: {similarity:.4f})")
 
         # MLM任务的召回率计算
         if text_mask is not None:

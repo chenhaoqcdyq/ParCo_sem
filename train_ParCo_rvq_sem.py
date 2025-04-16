@@ -253,14 +253,6 @@ train_loader = dataset_VQ_bodypart_text.DATALoader(args.dataname,
 if args.ddp:
     train_loader = get_dataloader(train_loader.dataset, args.batch_size, True)
 train_loader_iter = dataset_VQ_bodypart_text.cycle(train_loader)
-
-# if args.lgvq > 0:
-#     val_sem_loader = dataset_VQ_bodypart_text.DATALoader(args.dataname,
-#                             32,
-#                             window_size=args.window_size,
-#                             num_workers=10,
-#                             unit_length=1)
-#     val_sem_iter = dataset_VQ_bodypart_text.cycle(val_sem_loader)
     
 val_loader = dataset_TM_eval_bodypart.DATALoader(args.dataname, False,
                                         32,

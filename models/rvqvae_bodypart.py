@@ -2352,7 +2352,9 @@ class EnhancedVQVAEv11(nn.Module):
             part_dims=[7,62,62,48,48,48]
         self.part_dims = part_dims
         self.d_model = d_model
-        if args.lgvq == 5:
+        if 'lgvq' not in args:
+            args.lgvq = 0
+        elif args.lgvq == 5:
             self.lgvq = LGVQv5(args, d_model=d_model, num_layers=args.lglayers, down_sample=args.down_sample if "down_sample" in args else False)
         elif args.lgvq==6:
             self.dual = Dualsem_encoderv2(args, num_layers=args.lglayers, d_model=d_model, down_sample=args.down_sample if "down_sample" in args else False)
@@ -2454,7 +2456,13 @@ class EnhancedVQVAEv11(nn.Module):
                     
             code_list.append(code_idx)
         return code_list
-        
+    
+    def decode(self, code_list):
+        x_out_list = []
+        for idx, name in enumerate(self.parts_name):
+            decoder = getattr(self, f'dec_{name}')
+            x_out_list.append(decoder(code_list[idx]).permute(0,2,1))
+        return x_out_list
 
 class EnhancedVQVAEv12(EnhancedVQVAEv5):
     def __init__(self, args,
@@ -2793,6 +2801,19 @@ class EnhancedVQVAEv21(nn.Module):
                     code_idx[:, motion_length.item()] = quantizer.nb_code
             code_list.append(code_idx)
         return code_list
+    
+    def decode(self, code_list):
+        x_out_list = []
+        for idx, name in enumerate(self.parts_name):
+            decoder = getattr(self, f'dec_{name}')
+            # code_idx_mask = torch.ones_like(code_list[idx])
+            code_idx = torch.tensor(code_list[idx]).to(self.cmt.parameters().__next__().device)
+            code_idx_mask = code_idx < self.args.vqvae_arch_cfg['parts_code_nb'][name]
+            code_idx = code_idx * code_idx_mask
+            quantizer = getattr(self, f'quantizer_{name}')
+            x_quantized = quantizer.dequantize(code_idx)
+            x_out_list.append(decoder(x_quantized.unsqueeze(0).permute(0,2,1)).permute(0,2,1))
+        return x_out_list
     
     def text_motion_topk(self, motion, text, motion_mask=None, topk=5, text_mask=None):
         fused_feat = self.cmt(motion, motion_mask)
@@ -3244,6 +3265,9 @@ class HumanVQVAETransformerV11(nn.Module):
     
     def encode(self, x, motion_mask=None):
         return self.enhancedvqvae.encode(x, motion_mask)
+    
+    def decode(self, code_index):
+        return self.enhancedvqvae.decode(code_index)
 
 # 完全使用transformer的encoder
 class HumanVQVAETransformerV12(HumanVQVAETransformer):
@@ -3401,6 +3425,9 @@ class HumanVQVAETransformerV24(nn.Module):
 
     def encode(self, motion, motion_mask=None):
         return self.enhancedvqvae.encode(motion, motion_mask)
+    
+    def decode(self, code_index):
+        return self.enhancedvqvae.decode(code_index)
     
     def text_motion_topk(self, motion, text, motion_mask=None, topk=5, text_mask=None):
         return self.enhancedvqvae.text_motion_topk(motion, text, motion_mask, topk, text_mask)
