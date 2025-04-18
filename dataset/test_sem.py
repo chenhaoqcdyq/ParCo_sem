@@ -135,7 +135,7 @@ class VQMotionDatasetBodyPart(data.Dataset):
 
         print("Total number of motions {}".format(len(self.data)))
         # self.get_vqvae_code("output/00762-t2m-v24/VQVAE-v24-t2m-default/net_best_fid.pth","output/00762-t2m-v24/VQVAE-v24-t2m-default/train_config.json")
-        self.get_vqvae_code("output/00889-t2m-v24_dual3_downlayer1/VQVAE-v24_dual3_downlayer1-t2m-default/net_best_fid.pth","output/00889-t2m-v24_dual3_downlayer1/VQVAE-v24_dual3_downlayer1-t2m-default/train_config.json", is_val=is_val)
+        self.get_vqvae_code("output/00889-t2m-v24_dual3_downlayer1/VQVAE-v24_dual3_downlayer1-t2m-default/net_last.pth","output/00889-t2m-v24_dual3_downlayer1/VQVAE-v24_dual3_downlayer1-t2m-default/train_config.json", is_val=is_val)
         # self.get_vqvae_code("output/00417-t2m-v11/VQVAE-v11-t2m-default/net_best_fid.pth","output/00417-t2m-v11/VQVAE-v11-t2m-default/train_config.json")
         # self.get_vqvae_code("output/00417-t2m-v11/VQVAE-v11-t2m-default/net_best_fid.pth","output/00417-t2m-v11/VQVAE-v11-t2m-default/train_config.json", is_val=is_val)
         self.tokenizer_name = "bert-base-uncased"

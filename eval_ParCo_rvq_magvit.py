@@ -75,7 +75,7 @@ eval_wrapper = EvaluatorModelWrapper(wrapper_opt)
 ##### ---- Dataloader ---- #####
 
 val_loader = dataset_TM_eval_bodypart.DATALoader(
-    train_args.dataname, True, 32, w_vectorizer, unit_length=2**train_args.down_t)
+    train_args.dataname, None, 32, w_vectorizer, unit_length=2**train_args.down_t, is_train=True)
 
 
 ##### ---- Network ---- #####
@@ -117,7 +117,7 @@ print('\n===> Start testing...')
 for i in range(repeat_time):
     print('\n===> Test round:', i)
     best_fid, best_iter, best_div, best_top1, best_top2, best_top3, best_matching, writer, logger, best_mpjpe = \
-        eval_bodypart.evaluation_vqvae(
+        eval_bodypart.evaluation_magvit2(
             test_args.test_npy_save_dir, val_loader, net, logger, writer,
             0, best_fid=1000, best_iter=0, best_div=100, best_top1=0, best_top2=0, best_top3=0,
             best_matching=100, eval_wrapper=eval_wrapper, draw=False, save=False, savenpy=(i==0))

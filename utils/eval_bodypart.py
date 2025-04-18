@@ -454,7 +454,7 @@ def evaluation_transformer_batch(out_dir, val_loader, net, trans, logger, writer
 
 
 @torch.no_grad()
-def evaluation_transformer_test_batch(out_dir, val_loader, net, trans, logger, writer, nb_iter, best_fid, best_iter, best_div, best_top1, best_top2, best_top3, best_matching, best_multi, clip_model, eval_wrapper, draw = True, save = True, savegif=False, savenpy=False, mmod_gen_times=30, skip_mmod=False) :
+def evaluation_transformer_test_batch(out_dir, val_loader, net, trans, logger, writer, nb_iter, best_fid, best_iter, best_div, best_top1, best_top2, best_top3, best_matching, best_multi, clip_model, eval_wrapper, draw = True, save = True, savegif=False, savenpy=False, mmod_gen_times=30, skip_mmod=False):
 
     trans.eval()
 
@@ -780,6 +780,226 @@ def calculate_frechet_feature_distance(feature_list1, feature_list2):
     )
     return dist
 
+from demo import Ours_MAGVIT2
+@torch.no_grad()        
+def evaluation_magvit2(out_dir, val_loader, net, logger, writer, nb_iter, best_fid, best_iter, best_div, best_top1, best_top2, best_top3, best_matching, eval_wrapper, draw = True, save = True, savegif=False, savenpy=False, best_mpjpe=1e9) : 
+    """
+    Evaluate the VQVAE, used in train and test.
+    Compute the FID, DIV, and R-Precision.
+    """
+    net.eval()
+    nb_sample = 0
+    
+    draw_org = []
+    draw_pred = []
+    draw_text = []
+
+    magvit2 = Ours_MAGVIT2()
+
+    motion_annotation_list = []
+    motion_pred_list = []
+
+    R_precision_real = 0
+    R_precision = 0
+
+    nb_sample = 0
+    matching_score_real = 0
+    matching_score_pred = 0
+    mpjpe = 0
+    num_poses = 0
+    for batch in tqdm(val_loader):
+
+        # Get motion and parts. We use parts to represent parts' motion.
+        word_embeddings, pos_one_hots, caption, sent_len, motion, m_length, token, name, parts = batch
+
+        motion = motion.cuda()
+
+        if torch.isnan(motion).sum() > 0 or torch.isinf(motion).sum() > 0:
+            print('Detected NaN or Inf in raw motion data')
+            print('NaN elem numbers:', torch.isnan(motion).sum())
+            print('Inf elem numbers:', torch.isinf(motion).sum())
+            print('motion:', motion)
+
+        # (text, motion) ==> (text_emb, motion_emb)
+        #   motion is normalized.
+        et, em = eval_wrapper.get_co_embeddings(word_embeddings, pos_one_hots, sent_len, motion, m_length)
+
+        if torch.isnan(em).sum() > 0:
+            print('Detected NaN in em (embedding of motion), replace NaN with 0.0')
+            print('NaN elem numbers:', torch.isnan(em).sum())
+            print('em:', em)
+            em = torch.nan_to_num(em)  # use default param to replace nan with 0.0. Require pytorch >= 1.8.0
+
+
+        bs, seq = motion.shape[0], motion.shape[1]
+
+        num_joints = 21 if motion.shape[-1] == 251 else 22
+        
+        pred_pose_eval = torch.zeros((bs, seq, motion.shape[-1])).cuda()
+        pred_len = torch.zeros((bs)).cuda()
+        result_list = magvit2.sample(caption)
+        for i in range(bs):
+
+            # [gt_motion] (augmented representation) ==[de-norm, convert]==> [gt_xyz] (xyz representation)
+            pose = val_loader.dataset.inv_transform(motion[i:i+1, :m_length[i], :].detach().cpu().numpy())
+            pose_xyz = recover_from_ric(torch.from_numpy(pose).float().cuda(), num_joints)
+
+
+            # Preprocess parts: get single sample from the batch
+            single_parts = []
+            for p in parts:
+                single_parts.append(p[i:i+1, :m_length[i]].cuda())
+
+            # (parts, GT) ==> (reconstruct_parts)
+            #   parts is normalized.
+            # try:
+            #     result = net(single_parts, caption[i:i+1])
+            # except:
+            #     result = net(single_parts)
+            
+            result = result_list[i]
+            # pred_parts_code = result
+            idx = torch.nonzero(result == 512)
+            if idx.numel() > 0:
+                m_length_pred = idx[:,1].min()
+                
+            else:
+                # pred_parts = torch.zeros((1, 0, 50, 50)).cuda()
+                m_length_pred = 196
+            pred_parts_code = result[:,:m_length_pred]
+            pred_len[i] = m_length_pred
+            pred_parts = net.decode(pred_parts_code)
+            # pred_pose, loss_commit, perplexity = net(motion[i:i+1, :m_length[i]])
+            # pred_parts = outputs['recon_parts']
+            # pred_parts ==> whole_motion
+            #   todo: support different shared_joint_rec_mode in the parts2whole function
+            pred_pose = val_loader.dataset.parts2whole(pred_parts, mode=val_loader.dataset.dataset_name)
+
+            # de-normalize reconstructed motion
+            pred_denorm = val_loader.dataset.inv_transform(pred_pose.detach().cpu().numpy())
+
+            # Convert to xyz representation
+            #   todo: maybe we should support the recover_from_rot, not only ric.
+            pred_xyz = recover_from_ric(torch.from_numpy(pred_denorm).float().cuda(), num_joints)
+            
+            if savenpy:
+                np.save(os.path.join(out_dir, name[i]+'_gt.npy'), pose_xyz[:, :m_length[i]].cpu().numpy())
+                np.save(os.path.join(out_dir, name[i]+'_pred.npy'), pred_xyz.detach().cpu().numpy())
+
+            pred_pose_eval[i:i+1,:pred_len[i].long(),:] = pred_pose
+            min_seq_len = min(m_length[i], pred_len[i]).long()
+            mpjpe += torch.sum(calculate_mpjpe(pose_xyz[:,:min_seq_len], pred_xyz[:,:min_seq_len]))
+            num_poses += pose_xyz.shape[0]
+            
+            if i < min(4, bs):
+                draw_org.append(pose_xyz)
+                draw_pred.append(pred_xyz)
+                draw_text.append(caption[i])
+
+        # pred_pose_eval is normalized
+        et_pred, em_pred = eval_wrapper.get_co_embeddings(
+            word_embeddings, pos_one_hots, sent_len, pred_pose_eval, pred_len)
+
+        motion_pred_list.append(em_pred)
+        motion_annotation_list.append(em)
+            
+        temp_R, temp_match = calculate_R_precision(et.cpu().numpy(), em.cpu().numpy(), top_k=3, sum_all=True)
+        R_precision_real += temp_R
+        matching_score_real += temp_match
+        temp_R, temp_match = calculate_R_precision(et_pred.cpu().numpy(), em_pred.cpu().numpy(), top_k=3, sum_all=True)
+        R_precision += temp_R
+        matching_score_pred += temp_match
+
+        nb_sample += bs
+    mpjpe = mpjpe / num_poses
+    motion_annotation_np = torch.cat(motion_annotation_list, dim=0).cpu().numpy()
+    motion_pred_np = torch.cat(motion_pred_list, dim=0).cpu().numpy()
+
+    gt_mu, gt_cov  = calculate_activation_statistics(motion_annotation_np)
+    mu, cov= calculate_activation_statistics(motion_pred_np)
+
+    diversity_real = calculate_diversity(motion_annotation_np, 300 if nb_sample > 300 else 100)
+    diversity = calculate_diversity(motion_pred_np, 300 if nb_sample > 300 else 100)
+
+    R_precision_real = R_precision_real / nb_sample
+    R_precision = R_precision / nb_sample
+
+    matching_score_real = matching_score_real / nb_sample
+    matching_score_pred = matching_score_pred / nb_sample
+
+    fid = calculate_frechet_distance(gt_mu, gt_cov, mu, cov)
+
+    msg = f"--> \t Eva. Iter {nb_iter} :, FID. {fid:.4f}, Diversity Real. {diversity_real:.4f}, Diversity. {diversity:.4f}, R_precision_real. {R_precision_real}, R_precision. {R_precision}, matching_score_real. {matching_score_real}, matching_score_pred. {matching_score_pred}, mpjpe. {mpjpe:.4f}"
+    logger.info(msg)
+    
+    if draw:
+        writer.add_scalar('./Test/FID', fid, nb_iter)
+        writer.add_scalar('./Test/Diversity', diversity, nb_iter)
+        writer.add_scalar('./Test/top1', R_precision[0], nb_iter)
+        writer.add_scalar('./Test/top2', R_precision[1], nb_iter)
+        writer.add_scalar('./Test/top3', R_precision[2], nb_iter)
+        writer.add_scalar('./Test/matching_score', matching_score_pred, nb_iter)
+
+    
+        # if nb_iter % 5000 == 0 : 
+        #     for ii in range(4):
+        #         tensorborad_add_video_xyz(writer, draw_org[ii], nb_iter, tag='./Vis/org_eval'+str(ii), nb_vis=1, title_batch=[draw_text[ii]], outname=[os.path.join(out_dir, 'gt'+str(ii)+'.gif')] if savegif else None)
+            
+        # if nb_iter % 5000 == 0 : 
+        #     for ii in range(4):
+        #         tensorborad_add_video_xyz(writer, draw_pred[ii], nb_iter, tag='./Vis/pred_eval'+str(ii), nb_vis=1, title_batch=[draw_text[ii]], outname=[os.path.join(out_dir, 'pred'+str(ii)+'.gif')] if savegif else None)   
+
+    
+    if fid < best_fid : 
+        msg = f"--> --> \t FID Improved from {best_fid:.5f} to {fid:.5f} !!!"
+        logger.info(msg)
+        best_fid, best_iter = fid, nb_iter
+        if save:
+            torch.save({'net' : net.state_dict()}, os.path.join(out_dir, 'net_best_fid.pth'))
+
+    if abs(diversity_real - diversity) < abs(diversity_real - best_div) : 
+        msg = f"--> --> \t Diversity Improved from {best_div:.5f} to {diversity:.5f} !!!"
+        logger.info(msg)
+        best_div = diversity
+        if save:
+            torch.save({'net' : net.state_dict()}, os.path.join(out_dir, 'net_best_div.pth'))
+
+    if R_precision[0] > best_top1 : 
+        msg = f"--> --> \t Top1 Improved from {best_top1:.4f} to {R_precision[0]:.4f} !!!"
+        logger.info(msg)
+        best_top1 = R_precision[0]
+        if save:
+            torch.save({'net' : net.state_dict()}, os.path.join(out_dir, 'net_best_top1.pth'))
+
+    if R_precision[1] > best_top2 : 
+        msg = f"--> --> \t Top2 Improved from {best_top2:.4f} to {R_precision[1]:.4f} !!!"
+        logger.info(msg)
+        best_top2 = R_precision[1]
+    
+    if R_precision[2] > best_top3 : 
+        msg = f"--> --> \t Top3 Improved from {best_top3:.4f} to {R_precision[2]:.4f} !!!"
+        logger.info(msg)
+        best_top3 = R_precision[2]
+    
+    if matching_score_pred < best_matching : 
+        msg = f"--> --> \t matching_score Improved from {best_matching:.5f} to {matching_score_pred:.5f} !!!"
+        logger.info(msg)
+        best_matching = matching_score_pred
+        if save:
+            torch.save({'net' : net.state_dict()}, os.path.join(out_dir, 'net_best_matching.pth'))
+            
+    if mpjpe < best_mpjpe:
+        msg = f"--> --> \t mpjpe Improved from {best_mpjpe:.5f} to {mpjpe:.5f} !!!"
+        logger.info(msg)
+        best_mpjpe = mpjpe
+        # if save:
+        #     torch.save({'net' : net.state_dict()}, os.path.join(out_dir, 'net_best_mpjpe.pth'))
+    if save:
+        torch.save({'net' : net.state_dict()}, os.path.join(out_dir, 'net_last.pth'))
+
+    net.train()
+    return best_fid, best_iter, best_div, best_top1, best_top2, best_top3, best_matching, writer, logger, best_mpjpe
+
 def calculate_motion_metrics(code_indices, eval_wrapper, top_k=3, save_path=None):
     """
     计算预测动作的评估指标
@@ -797,7 +1017,7 @@ def calculate_motion_metrics(code_indices, eval_wrapper, top_k=3, save_path=None
         'diversity': 0.0,
         'top_k_accuracy': [0.0] * top_k,
         'matching_score': 0.0,
-        'mpjpe': 0.0
+        'fid': 0.0
     }
     
     # 将预测动作转换为numpy数组
@@ -806,8 +1026,10 @@ def calculate_motion_metrics(code_indices, eval_wrapper, top_k=3, save_path=None
     pos_one_hots = [code_indices[name]['pos_one_hots'] for name in code_indices]
     caption = [code_indices[name]['caption'] for name in code_indices]
     sent_len = [code_indices[name]['sent_len'] for name in code_indices]
-    mean = torch.from_numpy(np.load('./dataset/HumanML3D/Mean.npy')).cuda()
-    std = torch.from_numpy(np.load('./dataset/HumanML3D/Std.npy')).cuda()
+    m_length = [code_indices[name]['m_length'] for name in code_indices]
+    gt_motions = [code_indices[name]['gt'] for name in code_indices]
+    mean = torch.from_numpy(np.load('checkpoints/t2m/Decomp_SP001_SM001_H512/meta/mean.npy')).cuda()
+    std = torch.from_numpy(np.load('checkpoints/t2m/Decomp_SP001_SM001_H512/meta/std.npy')).cuda()
     # 计算动作嵌入
     pred_embeddings = []
     et_pred_list = []
@@ -815,7 +1037,7 @@ def calculate_motion_metrics(code_indices, eval_wrapper, top_k=3, save_path=None
     
     for i in range(len(pred_motions)):
         # 确保m_length是一个标量值，而不是张量
-        m_length = pred_motions[i].shape[1]
+        # m_length = pred_motions[i].shape[1]
             
         # 计算动作嵌入
         et_pred, em_pred = eval_wrapper.get_co_embeddings(
@@ -823,7 +1045,7 @@ def calculate_motion_metrics(code_indices, eval_wrapper, top_k=3, save_path=None
             pos_one_hots[i].unsqueeze(0), 
             torch.tensor([sent_len[i]], dtype=torch.int64).to(pred_motions[i].device), 
             pred_motions[i], 
-            torch.tensor([m_length], dtype=torch.int64).to(pred_motions[i].device))
+            torch.tensor([m_length[i]], dtype=torch.int64).to(pred_motions[i].device))
         pred_embeddings.append(em_pred)
         et_pred_list.append(et_pred)
         em_pred_list.append(em_pred)
@@ -839,10 +1061,10 @@ def calculate_motion_metrics(code_indices, eval_wrapper, top_k=3, save_path=None
     R_precision_list = []
     matching_score_pred_list = []
     for i in range(len(pred_motions)//batch):
-        R_precision, matching_score_pred = calculate_R_precision(et_pred[i*batch:(i+1)*batch].cpu().numpy(), em_pred[i*batch:(i+1)*batch].cpu().numpy(), top_k=3, sum_all=True)
+        R_precision_tmp, matching_score_pred_tmp = calculate_R_precision(et_pred[i*batch:(i+1)*batch].cpu().numpy(), em_pred[i*batch:(i+1)*batch].cpu().numpy(), top_k=3, sum_all=True)
         # print(R_precision, matching_score_pred)
-        R_precision_list.append(R_precision)
-        matching_score_pred_list.append(matching_score_pred)
+        R_precision_list.append(R_precision_tmp)
+        matching_score_pred_list.append(matching_score_pred_tmp)
     R_precision = sum(R_precision_list) / len(R_precision_list)
     matching_score_pred = sum(matching_score_pred_list) / len(matching_score_pred_list)
     # R_precision += temp_R
@@ -852,7 +1074,22 @@ def calculate_motion_metrics(code_indices, eval_wrapper, top_k=3, save_path=None
     # top_k_mat = calculate_top_k(argmax, top_k)
     metrics['top_k_accuracy'] = R_precision / batch
     metrics['matching_score'] = matching_score_pred / batch
+    et_gt_list = []
+    em_gt_list = []
+    for i in range(len(gt_motions)):
+        # 计算动作嵌入
+        et_gt, em_gt = eval_wrapper.get_co_embeddings(
+            word_embeddings[i].unsqueeze(0), 
+            pos_one_hots[i].unsqueeze(0), 
+            torch.tensor([sent_len[i]], dtype=torch.int64).to(gt_motions[i].device), 
+            gt_motions[i].unsqueeze(0), 
+            torch.tensor([m_length[i]], dtype=torch.int64).to(gt_motions[i].device))
+        em_gt_list.append(em_gt)
+    em_gt = torch.cat(em_gt_list, dim=0).cpu().numpy()
     
+    gt_mu, gt_cov  = calculate_activation_statistics(em_gt)
+    mu, cov= calculate_activation_statistics(em_pred.numpy())
+    metrics['fid'] = calculate_frechet_distance(gt_mu, gt_cov, mu, cov)
     # # 计算MPJPE (Mean Per Joint Position Error)
     # # 这里我们计算相邻帧之间的MPJPE
     # total_mpjpe = 0
@@ -866,9 +1103,9 @@ def calculate_motion_metrics(code_indices, eval_wrapper, top_k=3, save_path=None
     
     # if count > 0:
     #     metrics['mpjpe'] = total_mpjpe / count
-    
+    print(metrics)
     if save_path is not None:
-        infer_out_dir = os.path.join("/workspace/motion_diffusion/ParCo/dataset/HumanML3D/gen", os.path.basename(save_path), 'infer_out')
+        infer_out_dir = os.path.join(save_path, 'infer_out')
         os.makedirs(infer_out_dir, exist_ok=True)
         for i in range(len(pred_motions)):  
             pred_xyz = recover_from_ric((pred_motions[i]*std + mean).float(), 22)
@@ -876,7 +1113,8 @@ def calculate_motion_metrics(code_indices, eval_wrapper, top_k=3, save_path=None
             npy_save_dir = os.path.join(infer_out_dir, f'{i}_motion.npy')
             gif_save_dir = os.path.join(infer_out_dir, f'{i}_skeleton_viz.gif')
             np.save(npy_save_dir, xyz.detach().cpu().numpy())
-            pose_vis = plot_3d.draw_to_batch(xyz.detach().cpu().numpy(), caption[i], [gif_save_dir])
+            pose_vis = plot_3d.draw_to_batch(xyz.detach().cpu().numpy(), [caption[i]], [gif_save_dir])
+            print(caption[i], "save in ", gif_save_dir)
         # metrics['mpjpe'] += calculate_mpjpe(xyz, pred_motions[i]) 
     
     return metrics
@@ -885,7 +1123,7 @@ class CodeIndexEvaluator:
     """
     用于读取编码索引文件，解码动作并评估的类
     """
-    def __init__(self, net, eval_wrapper, val_loader, dataset_name='t2m', device='cuda'):
+    def __init__(self, net, eval_wrapper, val_loader, dataset_name='t2m', device='cuda', path=False):
         """
         初始化评估器
         
@@ -903,6 +1141,10 @@ class CodeIndexEvaluator:
         self.net.eval()
         self.parts_name = ['Root', 'R_Leg', 'L_Leg', 'Backbone', 'R_Arm', 'L_Arm']
         self.val_loader = val_loader
+        if path:
+            self.have_path = True
+        else:
+            self.have_path = False
         
     def load_code_indices(self, code_dir):
         """
@@ -922,11 +1164,15 @@ class CodeIndexEvaluator:
                 name = os.path.splitext(filename)[0]
                 if filename.endswith('.npy'):
                     code_index = np.load(file_path)
-                else:
+                    if len(code_index.shape) == 3:
+                        code_index = code_index[0,...]
+                elif filename.endswith('.npz'):
                     # code_index = np.load(file_path)['arr_0']
                     data = np.load(file_path)
                     code_index = [data[part] for part in self.parts_name]
                     code_index = np.concatenate(code_index, axis=0)
+                else:
+                    continue
                 # code_indices[name] = code_index
                 code_tmp['code_index'] = code_index
                 # code_tmp['name'] = data['motion']
@@ -945,7 +1191,7 @@ class CodeIndexEvaluator:
                     code_indices[name]['motion'] = motion[i]
                     code_indices[name]['m_length'] = m_length[i]
                     code_indices[name]['token'] = token[i]
-                    # code_indices[name]['parts'] = parts[i]
+                    code_indices[name]['gt'] = motion[i]
                     
         new_code_indices = {}
         for name in code_indices:
@@ -1004,7 +1250,10 @@ class CodeIndexEvaluator:
         # motion_list = [code_indices[name]['decoded_motion'] for name in code_indices]
         
         # 计算评估指标
-        metrics = calculate_motion_metrics(code_indices, self.eval_wrapper, save_path=self.path)
+        if self.path is not None:
+            metrics = calculate_motion_metrics(code_indices, self.eval_wrapper, save_path=self.path)
+        else:
+            metrics = calculate_motion_metrics(code_indices, self.eval_wrapper)
         
         return metrics
     
@@ -1018,7 +1267,10 @@ class CodeIndexEvaluator:
         Returns:
             dict: 评估指标
         """
-        self.path = code_dir
+        if self.have_path:
+            self.path = code_dir
+        else:
+            self.path = None
         # 加载编码索引
         code_indices = self.load_code_indices(code_dir)
         
@@ -1051,8 +1303,9 @@ if __name__ == "__main__":
     from utils.word_vectorizer import WordVectorizer
     from utils.misc import EasyDict
     test_args = option_vq.get_vavae_test_args_parser()
-    test_args.select_vqvae_ckpt = 'last'
-    test_args.vqvae_train_dir = 'output/00889-t2m-v24_dual3_downlayer1/VQVAE-v24_dual3_downlayer1-t2m-default'
+    test_args.select_vqvae_ckpt = 'fid'
+    test_args.vqvae_train_dir = 'output/00417-t2m-v11/VQVAE-v11-t2m-default'
+    # test_args.vqvae_train_dir = 'output/00889-t2m-v24_dual3_downlayer1/VQVAE-v24_dual3_downlayer1-t2m-default'
     select_ckpt = test_args.select_vqvae_ckpt
     assert select_ckpt in [
         'last',  # last  saved ckpt
@@ -1142,8 +1395,12 @@ if __name__ == "__main__":
     matching = []
     repeat_time = 20
     # 初始化评估器
-    evaluator = CodeIndexEvaluator(net, eval_wrapper, val_loader)
-    code_dir = "/workspace/motion_diffusion/ParCo/dataset/HumanML3D/vqvae_code24_lg7_val"
+    evaluator = CodeIndexEvaluator(net, eval_wrapper, val_loader, path=True)
+    # code_dir = "/workspace/motion_diffusion/ParCo/dataset/HumanML3D/gen/0416_Val_lg0"
+    # code_dir = "/workspace/motion_diffusion/ParCo/dataset/HumanML3D/vqvae_code11_lg0_val"
+    # code_dir = "/workspace/motion_diffusion/ParCo/dataset/HumanML3D/vqvae_code24_lg7_val"
+    code_dir = "/workspace/motion_diffusion/ParCo/dataset/HumanML3D/gen/output_0417/0/Val"
+    
     # 评估指定目录中的所有编码索引文件
     metrics = evaluator.evaluate_code_directory(code_dir)
     print(metrics)

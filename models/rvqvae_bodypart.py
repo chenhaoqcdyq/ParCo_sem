@@ -2461,7 +2461,13 @@ class EnhancedVQVAEv11(nn.Module):
         x_out_list = []
         for idx, name in enumerate(self.parts_name):
             decoder = getattr(self, f'dec_{name}')
-            x_out_list.append(decoder(code_list[idx]).permute(0,2,1))
+            # code_idx_mask = torch.ones_like(code_list[idx])
+            code_idx = torch.tensor(code_list[idx]).to(decoder.parameters().__next__().device)
+            code_idx_mask = code_idx < self.args.vqvae_arch_cfg['parts_code_nb'][name]
+            code_idx = code_idx * code_idx_mask
+            quantizer = getattr(self, f'quantizer_{name}')
+            x_quantized = quantizer.dequantize(code_idx)
+            x_out_list.append(decoder(x_quantized.unsqueeze(0).permute(0,2,1)).permute(0,2,1))
         return x_out_list
 
 class EnhancedVQVAEv12(EnhancedVQVAEv5):

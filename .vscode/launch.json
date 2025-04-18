@@ -256,17 +256,38 @@
   //     }
   //   }
   // ]
+  // "version": "0.2.0",
+  // "configurations": [
+  //   {
+  //     "name": "Python 调试程序: 包含参数的当前文件",
+  //     "type": "debugpy",
+  //     "request": "launch",
+  //     "program": "utils/eval_bodypart.py",
+  //     "console": "integratedTerminal",
+  //     "args": [
+  //       // "--vqvae-train-dir=output/ParCo_official_HumanML3D/VQVAE-ParCo-t2m-default",
+  //       // "--select-vqvae-ckpt=fid"
+  //     ],
+  //     "justMyCode": false,
+  //     "env": {
+  //       "PYTHONPATH": "${workspaceFolder}/..:${env:PYTHONPATH}",
+  //       "TORCH_DISTRIBUTED_DEBUG": "INFO",
+  //       "CUDA_VISIBLE_DEVICES": "1",
+  //       "TOKENIZERS_PARALLELISM": "false"
+  //     }
+  //   }
+  // ]
   "version": "0.2.0",
   "configurations": [
     {
       "name": "Python 调试程序: 包含参数的当前文件",
       "type": "debugpy",
       "request": "launch",
-      "program": "utils/eval_bodypart.py",
+      "program": "eval_ParCo_rvq_magvit.py",
       "console": "integratedTerminal",
       "args": [
-        // "--vqvae-train-dir=output/ParCo_official_HumanML3D/VQVAE-ParCo-t2m-default",
-        // "--select-vqvae-ckpt=fid"
+        "--vqvae-train-dir=output/00417-t2m-v11/VQVAE-v11-t2m-default",
+        "--select-vqvae-ckpt=fid"
       ],
       "justMyCode": false,
       "env": {
