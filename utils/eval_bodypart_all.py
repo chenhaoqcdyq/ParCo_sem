@@ -80,6 +80,11 @@ def evaluation_vqvae(out_dir, val_loader, net, logger, writer, nb_iter, best_fid
         
         pred_pose_eval = torch.zeros((bs, seq, motion.shape[-1])).cuda()
 
+        try:
+            result = net(motion.float(), caption)
+        except:
+            result = net(motion.float())
+        pred_parts = result[0]
         for i in range(bs):
 
             # [gt_motion] (augmented representation) ==[de-norm, convert]==> [gt_xyz] (xyz representation)
@@ -88,24 +93,21 @@ def evaluation_vqvae(out_dir, val_loader, net, logger, writer, nb_iter, best_fid
 
 
             # Preprocess parts: get single sample from the batch
-            single_parts = []
-            for p in parts:
-                single_parts.append(p[i:i+1, :m_length[i]].cuda())
+            # single_parts = []
+            # for p in parts:
+            #     single_parts.append(p[i:i+1, :m_length[i]].cuda())
 
             # (parts, GT) ==> (reconstruct_parts)
             #   parts is normalized.
-            try:
-                result = net(single_parts, caption[i:i+1])
-            except:
-                result = net(single_parts)
-            pred_parts = result[0]
+            
+            
 
             # pred_pose, loss_commit, perplexity = net(motion[i:i+1, :m_length[i]])
             # pred_parts = outputs['recon_parts']
             # pred_parts ==> whole_motion
             #   todo: support different shared_joint_rec_mode in the parts2whole function
-            pred_pose = val_loader.dataset.parts2whole(pred_parts, mode=val_loader.dataset.dataset_name)
-
+            # pred_pose = val_loader.dataset.parts2whole(pred_parts, mode=val_loader.dataset.dataset_name)
+            pred_pose = pred_parts[0][i][:m_length[i]]
             # de-normalize reconstructed motion
             pred_denorm = val_loader.dataset.inv_transform(pred_pose.detach().cpu().numpy())
 
@@ -118,7 +120,8 @@ def evaluation_vqvae(out_dir, val_loader, net, logger, writer, nb_iter, best_fid
                 np.save(os.path.join(out_dir, name[i]+'_pred.npy'), pred_xyz.detach().cpu().numpy())
 
             pred_pose_eval[i:i+1,:m_length[i],:] = pred_pose
-            
+            if len(pred_xyz.shape) == 3:
+                pred_xyz = pred_xyz.unsqueeze(0)
             mpjpe += torch.sum(calculate_mpjpe(pose_xyz, pred_xyz))
             num_poses += pose_xyz.shape[0]
             
@@ -1157,7 +1160,7 @@ class CodeIndexEvaluator:
             dict: 文件名到编码索引的映射
         """
         code_indices = {}
-        for filename in tqdm(os.listdir(code_dir)):
+        for filename in os.listdir(code_dir):
             if filename.endswith('.npy') or filename.endswith('.npz'):
                 code_tmp = {}
                 file_path = os.path.join(code_dir, filename)
@@ -1399,7 +1402,7 @@ if __name__ == "__main__":
     # code_dir = "/workspace/motion_diffusion/ParCo/dataset/HumanML3D/gen/0416_Val_lg0"
     # code_dir = "/workspace/motion_diffusion/ParCo/dataset/HumanML3D/vqvae_code11_lg0_val"
     # code_dir = "/workspace/motion_diffusion/ParCo/dataset/HumanML3D/vqvae_code24_lg7_val"
-    code_dir = "/workspace/motion_diffusion/ParCo/dataset/HumanML3D/Sampler_v2"
+    code_dir = "/workspace/motion_diffusion/ParCo/dataset/HumanML3D/Sampler_llama"
     
     # 评估指定目录中的所有编码索引文件
     metrics = evaluator.evaluate_code_directory(code_dir)

@@ -1,9 +1,10 @@
 import math
+import time
 from einops import rearrange
 from sentence_transformers import SentenceTransformer
 import torch
 import torch.nn as nn
-from models.encdec import Decoder_wo_upsamplev1, Decoder_wo_upsamplev2, Encoder, Decoder, Encoderv2, EnhancedDecoder, Decoder_wo_upsample, PureMotionDecoder
+from models.encdec import Decoder_cnn, Decoder_wo_upsamplev1, Decoder_wo_upsamplev2, Encoder, Decoder, Encoder_cnn, Encoderv2, EnhancedDecoder, Decoder_wo_upsample, PureMotionDecoder
 import torch.nn.functional as F
 from models.lgvq import LGVQ, CausalTransformerEncoder, ContrastiveLossWithSTS, ContrastiveLossWithSTSV2, Dualsem_encoder, Dualsem_encoderv2, Dualsem_encoderv3, LGVQv2, LGVQv3, LGVQv4, LGVQv5, TemporalDownsamplerV3
 from models.quantize_cnn import QuantizeEMAReset, Quantizer, QuantizeEMA, QuantizeReset
@@ -16,7 +17,8 @@ import os
 from models.vqvae_bodypart import VQVAE_bodypart as VQVAE_ori
 from models.layers.transformer import SpatialTemporalBlock
 from models.resnet import Resnet1D
-os.environ["TOKENIZERS_PARALLELISM"] = "false"  # 必须放在其他导入之前
+# import time
+# os.environ["TOKENIZERS_PARALLELISM"] = "false"  # 必须放在其他导入之前
 
 class VQVAE_bodypart(nn.Module):
     def __init__(self,
@@ -38,14 +40,17 @@ class VQVAE_bodypart(nn.Module):
         self.parts_code_dim = parts_code_dim
         self.parts_output_dim = parts_output_dim
         self.parts_hidden_dim = parts_hidden_dim
-        self.quantizer_type = args.quantizer
+        # self.quantizer_type = args.quantizer
         self.down_t = down_t
         self.stride_t = stride_t
         self.depth = depth
         self.dilation_growth_rate = dilation_growth_rate
         self.activation = activation
         self.norm = norm
-
+        if 'causal' in args:
+            causal = args.causal
+        else:
+            causal = True
         if args.dataname == 't2m':
             parts_input_dim = {
                 'Root': 7,
@@ -61,8 +66,8 @@ class VQVAE_bodypart(nn.Module):
                 hidden_dim = parts_hidden_dim[name]
                 output_dim = parts_output_dim[name]
 
-                encoder = Encoder(raw_dim, output_dim, down_t, stride_t, hidden_dim, depth, dilation_growth_rate, activation=activation, norm=norm)
-                decoder = Decoder(raw_dim, output_dim, down_t, stride_t, hidden_dim, depth, dilation_growth_rate, activation=activation, norm=norm)
+                encoder = Encoder_cnn(raw_dim, output_dim, down_t, stride_t, hidden_dim, depth, dilation_growth_rate, activation=activation, norm=norm, causal=causal)
+                decoder = Decoder_cnn(raw_dim, output_dim, down_t, stride_t, hidden_dim, depth, dilation_growth_rate, activation=activation, norm=norm)
                 setattr(self, f'enc_{name}', encoder)
                 setattr(self, f'dec_{name}', decoder)
 
@@ -70,16 +75,14 @@ class VQVAE_bodypart(nn.Module):
                 # [Warning] code_dim (used in quantizer) must match the output_emb_width
                 assert code_dim == output_dim
                 nb_code = parts_code_nb[name]
-                rvqvae_config = {
-                    'num_quantizers': args.num_quantizers,
-                    'shared_codebook': args.shared_codebook,
-                    'quantize_dropout_prob': args.quantize_dropout_prob,
-                    'quantize_dropout_cutoff_index': 0,
-                    'nb_code': nb_code,
-                    'code_dim': code_dim,
-                    'args': args,
-                }
-                quantizer = ResidualVQ(**rvqvae_config)
+                if args.quantizer == "ema_reset":
+                    quantizer = QuantizeEMAReset(nb_code, code_dim, args)
+                elif args.quantizer == "orig":
+                    quantizer = Quantizer(nb_code, code_dim, 1.0)
+                elif args.quantizer == "ema":
+                    quantizer = QuantizeEMA(nb_code, code_dim, args)
+                elif args.quantizer == "reset":
+                    quantizer = QuantizeReset(nb_code, code_dim, args)
                 setattr(self, f'quantizer_{name}', quantizer)
 
         elif args.dataname == 'kit':
@@ -97,8 +100,8 @@ class VQVAE_bodypart(nn.Module):
                 hidden_dim = parts_hidden_dim[name]
                 output_dim = parts_output_dim[name]
 
-                encoder = Encoder(raw_dim, output_dim, down_t, stride_t, hidden_dim, depth, dilation_growth_rate, activation=activation, norm=norm)
-                decoder = Decoder(raw_dim, output_dim, down_t, stride_t, hidden_dim, depth, dilation_growth_rate, activation=activation, norm=norm)
+                encoder = Encoder_cnn(raw_dim, output_dim, down_t, stride_t, hidden_dim, depth, dilation_growth_rate, activation=activation, norm=norm, causal=causal)
+                decoder = Decoder_cnn(raw_dim, output_dim, down_t, stride_t, hidden_dim, depth, dilation_growth_rate, activation=activation, norm=norm)
                 setattr(self, f'enc_{name}', encoder)
                 setattr(self, f'dec_{name}', decoder)
 
@@ -106,24 +109,14 @@ class VQVAE_bodypart(nn.Module):
                 # [Warning] code_dim (used in quantizer) must match the output_emb_width
                 assert code_dim == output_dim
                 nb_code = parts_code_nb[name]
-                rvqvae_config = {
-                    'num_quantizers': args.num_quantizers,
-                    'shared_codebook': args.shared_codebook,
-                    'quantize_dropout_prob': args.quantize_dropout_prob,
-                    'quantize_dropout_cutoff_index': 0,
-                    'nb_code': nb_code,
-                    'code_dim': code_dim,
-                    'args': args,
-                }
-                quantizer = ResidualVQ(**rvqvae_config)
-                # if args.quantizer == "ema_reset":
-                #     quantizer = QuantizeEMAReset(nb_code, code_dim, args)
-                # elif args.quantizer == "orig":
-                #     quantizer = Quantizer(nb_code, code_dim, 1.0)
-                # elif args.quantizer == "ema":
-                #     quantizer = QuantizeEMA(nb_code, code_dim, args)
-                # elif args.quantizer == "reset":
-                #     quantizer = QuantizeReset(nb_code, code_dim, args)
+                if args.quantizer == "ema_reset":
+                    quantizer = QuantizeEMAReset(nb_code, code_dim, args)
+                elif args.quantizer == "orig":
+                    quantizer = Quantizer(nb_code, code_dim, 1.0)
+                elif args.quantizer == "ema":
+                    quantizer = QuantizeEMA(nb_code, code_dim, args)
+                elif args.quantizer == "reset":
+                    quantizer = QuantizeReset(nb_code, code_dim, args)
                 setattr(self, f'quantizer_{name}', quantizer)
         
         else:
@@ -218,12 +211,15 @@ class VQVAE_bodypart(nn.Module):
 
             # Quantization
             quantizer = getattr(self, f'quantizer_{name}')
-            x_quantized, code_idx, loss, perplexity = quantizer(x_encoder, sample_codebook_temp=0.5)
+            x_quantized, loss, perplexity = quantizer(x_encoder)
 
             # Decoder
             decoder = getattr(self, f'dec_{name}')
+            # time_decoder_start = time.time()
             x_decoder = decoder(x_quantized)
-
+            # time_decoder_end = time.time()
+            # print(f"Decoder time: {(time_decoder_end - time_decoder_start) * 1000} ms")
+            # self.dec_R_Leg(x_quantized)
             # Postprocess
             x_out = self.postprocess(x_decoder)  # (B, in_dim, nframes) ==> (B, nframes, in_dim)
 
@@ -232,7 +228,7 @@ class VQVAE_bodypart(nn.Module):
             perplexity_list.append(perplexity)
 
         # Return the list of x_out, loss, perplexity
-        return x_out_list, loss_list, perplexity_list
+        return x_out_list, loss_list, perplexity_list, torch.tensor(0.0)
 
 
     def forward_decoder(self, parts):
@@ -1853,6 +1849,40 @@ class EnhancedPartFusionV20(nn.Module):
         # 残差连接增强
         return rearrange(feature, 'b t p d -> p b t d', b=B)
 
+# V6版本去除全局特征
+class EnhancedPartFusionV20_all(nn.Module):
+    def __init__(self, 
+                 dim=263,
+                 d_model=256,
+                 nhead=8,
+                 num_layers=4,
+                 ):
+        super().__init__()
+
+        self.part_projs = DynamicProjection(dim, d_model=d_model)
+
+        time_encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=4*d_model,
+            batch_first=True
+        )
+        # self.spatial_transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.time_transformer = CausalTransformerEncoder(time_encoder_layer, num_layers=num_layers)
+
+    def forward(self, motion_feature, motion_mask=None):
+        # 部件特征预处理
+        B, T = motion_feature.shape[0], motion_feature.shape[1]
+        motion_feature = self.part_projs(motion_feature.permute(0, 2, 1)).permute(0, 2, 1)
+        if motion_mask is not None:
+            motion_mask = motion_mask.to(motion_feature.device).bool()
+            # time_key_padding_mask = motion_mask.repeat_interleave(6, dim=0)
+            time_feat = self.time_transformer(motion_feature, src_key_padding_mask=~motion_mask)  # [T, B*7, d]
+        else:
+            time_feat = self.time_transformer(motion_feature)
+        # 残差连接增强
+        return time_feat
+
 
 # 全身空间的交互
 class EnhancedPartFusionV5p(nn.Module):
@@ -2845,7 +2875,125 @@ class EnhancedVQVAEv21(nn.Module):
         else:
             result = self.lgvq.text_motion_topk(x_quantized_list, text, motion_mask, topk, text_mask)
         return result
+
+class EnhancedVQVAEv21_all(nn.Module):
+    def __init__(self, args,
+                 d_model=256,
+                 ):
+        super().__init__()
+        self.args = args
+        if args.dataname == 't2m':
+            dim=263
+        else:
+            dim=251
+        self.d_model = d_model
+        self.cmt = EnhancedPartFusionV20_all(d_model=self.d_model, dim=dim, num_layers=args.num_layers)
+        if args.lgvq==1:
+            self.lgvq = LGVQv3(args, d_model=d_model, num_layers=args.lglayers)
+        elif args.lgvq==4:
+            self.lgvq = LGVQv4(args, d_model=d_model, num_layers=args.lglayers)
+        elif args.lgvq==5:
+            self.lgvq = LGVQv5(args, d_model=d_model, num_layers=args.lglayers, down_sample=args.down_sample if "down_sample" in args else False)
+        elif args.lgvq==6:
+            self.dual = Dualsem_encoderv2(args, num_layers=args.lglayers, d_model=d_model, down_sample=args.down_sample if "down_sample" in args else False)
+        elif args.lgvq==7:
+            self.dual = Dualsem_encoderv3(args, d_model=d_model, down_sample=args.down_sample if "down_sample" in args else False, causal=args.causal)
+        self.quantizer = QuantizeEMAReset(args.vqvae_sem_nb, d_model, args)
+        self.decoder = Decoder_wo_upsample(dim, d_model, down_t=args.down_t, stride_t=args.stride_t, width=d_model, depth=args.depth, dilation_growth_rate=args.dilation_growth_rate, activation=args.vq_act, norm=args.vq_norm)
+
+
+    def forward(self, motion, text=None):
+        if self.args.lgvq>=1 and text is not None and len(text) == 4:
+            text_feature, text_id, text_mask, motion_mask = text
+        else:
+            text_feature, text_id, text_mask, motion_mask = None, None, None, None
+        time1 = time.time()
+        # 特征增强
+        fused_feat = self.cmt(motion, motion_mask)  # [B, seq, d_model]
+        # time2 = time.time()
+        # print(f"time1: {(time2 - time1) * 1000}ms")
+        # 原始编码流程
+        x_out_list = []
+        loss_list = []
         
+        x_quantized_list = []
+        # time3 = time.time()
+        # print(f"time2: {(time3 - time2) * 1000}ms")
+        x_quantized, loss, perplexity = self.quantizer(rearrange(fused_feat, 'b t d -> b d t'))
+        x_quantized_list.append(x_quantized.permute(0,2,1))
+        # time4 = time.time()
+        # print(f"time3: {(time4 - time3) * 1000}ms")
+        x_decoder = self.decoder(x_quantized)
+        x_out_list.append(rearrange(x_decoder, 'b d t -> b t d'))
+        # time5 = time.time()
+        # print(f"time4: {(time5 - time4) * 1000}ms")
+        if self.args.lgvq>=1 and len(text) == 4:
+            # text_feature, text_id, text_mask, motion_mask = text
+            _, loss = self.lgvq(x_quantized_list, [text_feature, text_id], text_mask, motion_mask)
+        else:
+            loss = torch.tensor(0.0).to(motion[0].device)
+        perplexity_list = [perplexity]
+        loss_list = [loss]
+        return x_out_list, loss_list, perplexity_list, loss
+    
+    def encode(self, motion, motion_mask=None):
+        fused_feat = self.cmt(motion, motion_mask)
+        code_list = []
+        for idx, name in enumerate(self.parts_name):
+            quantizer = getattr(self, f'quantizer_{name}')
+            x_encoder = fused_feat[idx, ...]
+            code_idx = quantizer.quantize(x_encoder)
+            # code_idx[~motion_mask.bool()] = quantizer.nb_code
+            if motion_mask is not None:
+                if len(motion_mask.shape) == 2:
+                    motion_mask = motion_mask[0]
+                bool_mask = motion_mask.bool()
+                motion_length = bool_mask.sum()
+                if motion_length.item() < code_idx.shape[1]:
+                    # padding
+                    code_idx[:, ~bool_mask] = quantizer.nb_code + 1
+                    # end token
+                    code_idx[:, motion_length.item()] = quantizer.nb_code
+            code_list.append(code_idx)
+        return code_list
+    
+    def decode(self, code_list):
+        x_out_list = []
+        for idx, name in enumerate(self.parts_name):
+            decoder = getattr(self, f'dec_{name}')
+            # code_idx_mask = torch.ones_like(code_list[idx])
+            code_idx = torch.tensor(code_list[idx]).to(self.cmt.parameters().__next__().device)
+            code_idx_mask = code_idx < self.args.vqvae_arch_cfg['parts_code_nb'][name]
+            code_idx = code_idx * code_idx_mask
+            quantizer = getattr(self, f'quantizer_{name}')
+            x_quantized = quantizer.dequantize(code_idx)
+            x_out_list.append(decoder(x_quantized.unsqueeze(0).permute(0,2,1)).permute(0,2,1))
+        return x_out_list
+    
+    def text_motion_topk(self, motion, text, motion_mask=None, topk=5, text_mask=None):
+        fused_feat = self.cmt(motion, motion_mask)
+        # 原始编码流程
+        x_encoder_list = []
+        loss_list = []
+        perplexity_list = []
+        x_quantized_list = []
+        for idx, name in enumerate(self.parts_name):
+            quantizer = getattr(self, f'quantizer_{name}')
+            # decoder = getattr(self, f'dec_{name}')
+            x_encoder = fused_feat[idx, ...]
+            x_encoder_list.append(x_encoder)
+            x_quantized, loss, perplexity = quantizer(rearrange(x_encoder, 'b t d -> b d t'))
+            x_quantized_list.append(x_quantized.permute(0,2,1))
+            loss_list.append(loss)
+            perplexity_list.append(perplexity)
+            # x_decoder = decoder(x_quantized)
+            # x_out_list.append(rearrange(x_decoder, 'b d t -> b t d'))
+            # text_feature, text_id, text_mask, motion_mask = text
+        if self.args.lgvq>=6:
+            result = self.dual.text_motion_topk(x_encoder_list, text, motion_mask, topk, text_mask)
+        else:
+            result = self.lgvq.text_motion_topk(x_quantized_list, text, motion_mask, topk, text_mask)
+        return result
 
 class EnhancedVQVAEv22(nn.Module):
     def __init__(self, args,
@@ -3073,6 +3221,7 @@ class HumanVQVAETransformer(nn.Module):
         param = torch.load(checkpoint)
         self.load_state_dict(param['net'], strict=False)
         print("load checkpoint from: ", checkpoint)
+
 
 class HumanVQVAETransformerV2(HumanVQVAETransformer):
     def __init__(self, args, **kwargs):
@@ -3437,6 +3586,46 @@ class HumanVQVAETransformerV24(nn.Module):
     
     def text_motion_topk(self, motion, text, motion_mask=None, topk=5, text_mask=None):
         return self.enhancedvqvae.text_motion_topk(motion, text, motion_mask, topk, text_mask)
+
+class HumanVQVAETransformerV25(nn.Module):
+    def __init__(self, args, **kwargs):
+        super().__init__()
+        self.enhancedvqvae = EnhancedVQVAEv21_all(args, args.d_model)
+        # del self.tokenizer, self.text_encoder, self.vqvae
+
+    def forward(self, x, caption = None):
+        x_out_list, loss_list, perplexity_list, loss_extend = self.enhancedvqvae(x, caption)
+
+        return x_out_list, loss_list, perplexity_list, loss_extend
+
+    def encode(self, motion, motion_mask=None):
+        return self.enhancedvqvae.encode(motion, motion_mask)
+    
+    def decode(self, code_index):
+        return self.enhancedvqvae.decode(code_index)
+    
+    def text_motion_topk(self, motion, text, motion_mask=None, topk=5, text_mask=None):
+        return self.enhancedvqvae.text_motion_topk(motion, text, motion_mask, topk, text_mask)
+
+class HumanVQVAETransformerV26(nn.Module):
+    def __init__(self, args, **kwargs):
+        super().__init__()
+        self.vqvae = VQVAE_bodypart(args, **kwargs)
+        # del self.tokenizer, self.text_encoder, self.vqvae
+
+    def forward(self, x, caption = None):
+        x_out_list, loss_list, perplexity_list, loss_extend = self.vqvae(x, caption)
+
+        return x_out_list, loss_list, perplexity_list, loss_extend
+
+    def encode(self, motion, motion_mask=None):
+        return self.vqvae.encode(motion, motion_mask)
+    
+    def decode(self, code_index):
+        return self.vqvae.forward_decoder(code_index)
+    
+    # def text_motion_topk(self, motion, text, motion_mask=None, topk=5, text_mask=None):
+    #     return self.vqvae.text_motion_topk(motion, text, motion_mask, topk, text_mask)
 
 def test_text():
     import clip

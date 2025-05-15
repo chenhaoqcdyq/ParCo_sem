@@ -1,8 +1,8 @@
 import os
 import json
 import re
+import time
 # import warnings
-import time # 添加 time 模块
 
 import torch
 import torch.optim as optim
@@ -20,7 +20,7 @@ from options.option_vq_bodypart import vqvae_bodypart_cfg, vqvae_bodypart_cfg_pl
 
 import utils.losses as losses
 import utils.utils_model as utils_model
-import utils.eval_bodypart as eval_bodypart
+import utils.eval_bodypart_all as eval_bodypart
 from utils.word_vectorizer import WordVectorizer
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -49,8 +49,43 @@ def freeze_encdec(net):
         else:
             module.eval()
     return net
+# 在解析args后添加分布式初始化逻辑
+def setup_distributed():
+    # 读取环境变量
+    rank = int(os.environ['RANK'])
+    local_rank = int(os.environ['LOCAL_RANK'])
+    world_size = int(os.environ['WORLD_SIZE'])
+    
+    # 初始化进程组
+    dist.init_process_group(
+        backend='nccl',
+        init_method='env://',
+        world_size=world_size,
+        rank=rank
+    )
+    
+    # 设置设备
+    torch.cuda.set_device(local_rank)
+    return rank, local_rank, world_size
 
-
+def get_dataloader(dataset, batch_size, shuffle):
+    sampler = DistributedSampler(
+        dataset, 
+        num_replicas=world_size,
+        rank=rank,
+        shuffle=shuffle
+    )
+    
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size // world_size,  # 调整实际batch size
+        sampler=sampler,
+        num_workers=args.num_workers,
+        pin_memory=True,
+        drop_last=True, 
+        persistent_workers=True
+    )
+    return loader
 
 # 确保所有进程使用相同种子
 def set_seed(seed):
@@ -58,14 +93,14 @@ def set_seed(seed):
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
-# def reduce_metric(tensor):
-#     """将各GPU的指标张量求和后取平均"""
-#     rt = tensor.clone()
-#     dist.all_reduce(rt, op=dist.ReduceOp.SUM)
-#     return rt / dist.get_world_size()
+def reduce_metric(tensor):
+    """将各GPU的指标张量求和后取平均"""
+    rt = tensor.clone()
+    dist.all_reduce(rt, op=dist.ReduceOp.SUM)
+    return rt / dist.get_world_size()
 
-# os.environ["MASTER_ADDR"]='127.0.0.1'
-# os.environ["MASTER_PORT"]='8675'
+os.environ["MASTER_ADDR"]='127.0.0.1'
+os.environ["MASTER_PORT"]='8675'
 ##### ---- Parse args ---- #####
 args = option_vq.get_args_parser()
 torch.manual_seed(args.seed)
@@ -74,12 +109,11 @@ if args.bodyconfig == True:
     args.vqvae_arch_cfg = vqvae_bodypart_cfg_plus[args.vqvae_cfg]
 else:
     args.vqvae_arch_cfg = vqvae_bodypart_cfg[args.vqvae_cfg]
-if args.lgvq > 0:
-    from dataset import dataset_VQ_bodypart_text_mask_196 as dataset_VQ_bodypart_text
-elif args.vision == 26:
-    from dataset import dataset_VQ_bodypart as dataset_VQ_bodypart_text
-else:
-    from dataset import dataset_VQ_bodypart_text_mask as dataset_VQ_bodypart_text
+# if args.lgvq > 0:
+#     from dataset import dataset_VQ_bodypart_text_mask_196 as dataset_VQ_bodypart_text
+# else:
+#     from dataset import dataset_VQ_bodypart_text_mask as dataset_VQ_bodypart_text
+from dataset import dataset_VQ_all_text_mask_196 as dataset_VQ_bodypart_text
 ##### ---- Exp dirs ---- #####
 """
 Directory of our exp:
@@ -126,7 +160,17 @@ print('Creating output directory...')
 os.makedirs(args.run_dir)
 ##### ---- ddp ---- #####
 set_seed(args.seed)
-# device = torch.device(f'cuda:0')
+if args.ddp:
+    rank, local_rank, world_size = setup_distributed()
+else:
+    rank, local_rank, world_size = 0, 0, 1
+device = torch.device(f'cuda:{local_rank}')
+# else:
+    # device = torch.device('cuda')
+    # rank, local_rank, world_size = 0, 0, 1
+args.rank = rank
+args.local_rank = local_rank
+args.world_size = world_size
 ##### ---- Logger ---- #####
 logger = utils_model.get_logger(args.run_dir)
 writer = SummaryWriter(args.run_dir)
@@ -151,8 +195,8 @@ else :
 
 logger.info(f'Training on {args.dataname}, motions are with {args.nb_joints} joints')
 
-wrapper_opt = get_opt(dataset_opt_path, torch.device('cuda'))
-# wrapper_opt = get_opt(dataset_opt_path, device)
+# wrapper_opt = get_opt(dataset_opt_path, torch.device('cuda'))
+wrapper_opt = get_opt(dataset_opt_path, device)
 eval_wrapper = EvaluatorModelWrapper(wrapper_opt)
 
 ##### ---- Network ---- #####
@@ -168,33 +212,39 @@ net = getattr(vqvae, f'HumanVQVAETransformerV{args.vision}')(args,  # use args t
         dilation_growth_rate=args.dilation_growth_rate,
         activation=args.vq_act,
         norm=args.vq_norm
-    )                        
+    )    
+if args.ddp:
+    net = DDP(net, device_ids=[local_rank], output_device=local_rank, broadcast_buffers=False, bucket_cap_mb=200)                      
 if args.resume_pth:
     logger.info('loading checkpoint from {}'.format(args.resume_pth))
-    ckpt = torch.load(args.resume_pth, map_location='cpu')
-    if args.lgvq == 5:
-        try:
-            new_ckpt = {}
-            for k, v in ckpt['net'].items():
-                if 'bert_model' not in k:
-                    new_ckpt[k] = v
-            net.load_state_dict(new_ckpt, strict=False)
-            print("load lgvq model")
-        except:
-            new_ckpt = {}
-            for k, v in ckpt['net'].items():
-                if 'lgvq' not in k:
-                    new_ckpt[k] = v
-            net.load_state_dict(new_ckpt, strict=False)
-            print("load wo lgvq model")
+    if args.ddp:
+        ckpt = torch.load(args.resume_pth, map_location=f'cuda:{local_rank}')
+        net.module.load_state_dict(ckpt['net'], strict=False)
     else:
-        net.load_state_dict(ckpt['net'], strict=False)
+        ckpt = torch.load(args.resume_pth, map_location='cpu')
+        if args.lgvq == 5:
+            try:
+                new_ckpt = {}
+                for k, v in ckpt['net'].items():
+                    if 'bert_model' not in k:
+                        new_ckpt[k] = v
+                net.load_state_dict(new_ckpt, strict=False)
+                print("load lgvq model")
+            except:
+                new_ckpt = {}
+                for k, v in ckpt['net'].items():
+                    if 'lgvq' not in k:
+                        new_ckpt[k] = v
+                net.load_state_dict(new_ckpt, strict=False)
+                print("load wo lgvq model")
+        else:
+            net.load_state_dict(ckpt['net'], strict=False)
 
 net.train()       
 if args.freeze_encdec:
     net = freeze_encdec(net)
 # net.eval()
-net.cuda()
+net.to(device)
 
 ##### ---- Dataloader ---- #####
 print('\n\n===> Constructing dataset and dataloader...\n\n')
@@ -202,13 +252,17 @@ train_loader = dataset_VQ_bodypart_text.DATALoader(args.dataname,
                                         args.batch_size,
                                         window_size=args.window_size,
                                         unit_length=2**args.down_t,
-                                        num_workers=12)
+                                        args=args)
+if args.ddp:
+    train_loader = get_dataloader(train_loader.dataset, args.batch_size, True)
 train_loader_iter = dataset_VQ_bodypart_text.cycle(train_loader)
     
 val_loader = dataset_TM_eval_bodypart.DATALoader(args.dataname, False,
                                         32,
                                         w_vectorizer,
                                         unit_length=2**args.down_t)
+if args.ddp:
+    val_loader = get_dataloader(val_loader.dataset, 32, False)
 ##### ---- Optimizer & Scheduler ---- #####
 print('\n===> Constructing optimizer, scheduler, and Loss...')
 def get_optimizer_params(net, base_lr, vqvae_lr):
@@ -230,37 +284,31 @@ Loss = losses.ReConsLossBodyPart(args.recons_loss, args.nb_joints)
 
 ##### ------ warm-up ------- #####
 print('\n===> Start warm-up training\n\n')
-
+# time_start = time.time()
 avg_recons, avg_perplexity, avg_commit = 0., 0., 0.
 avg_contrastive, avg_disentangle = 0., 0.
 for nb_iter in range(1, args.warm_up_iter):
-    # iter_start_time = time.time() # 迭代开始时间
+    if args.ddp: 
+        train_loader.sampler.set_epoch(nb_iter)
     optimizer, current_lr = update_lr_warm_up(optimizer, nb_iter, args.warm_up_iter, args.lr)
     # train_loader_iter = dataset_VQ_bodypart_text.cycle(train_loader)
-    
-    # data_load_start_time = time.time()
     batch = next(train_loader_iter)
-    # data_load_end_time = time.time()
-    
-    # preprocess_start_time = time.time()
-    if args.vision != 26:
-        if len(batch) == 3:
-            gt_parts, text, text_id = batch
-        elif len(batch) == 6:   
-            gt_parts, text, text_token, text_feature, text_feature_all, text_id = batch
-        elif len(batch) == 7:
-            gt_parts, text, text_token, text_feature, text_feature_all, text_id, text_mask = batch
-        elif len(batch) == 8:
-            gt_parts, text, text_token, text_feature, text_feature_all, text_id, text_mask, motion_mask = batch
-        else:
-            raise ValueError("The length of batch is not correct.")
-        
+    if len(batch) == 3:
+        gt_motion, text, text_id = batch
+    elif len(batch) == 6:   
+        gt_motion, text, text_token, text_feature, text_feature_all, text_id = batch
+    elif len(batch) == 7:
+        gt_motion, text, text_token, text_feature, text_feature_all, text_id, text_mask = batch
+    elif len(batch) == 8:
+        gt_motion, text, text_token, text_feature, text_feature_all, text_id, text_mask, motion_mask = batch
+    elif len(batch) == 9:
+        gt_motion, text, text_token, text_feature, text_feature_all, text_id, text_mask, motion_mask, gt_parts = batch
     else:
-        gt_parts = batch
-        text_feature, text_id, text_mask, motion_mask = None, None, None, None
-        # gt_parts = gt_parts.to(device).float()
-    for i in range(len(gt_parts)):
-        gt_parts[i] = gt_parts[i].cuda().float()
+        raise ValueError("The length of batch is not correct.")
+    # for i in range(len(gt_parts)):
+    #     gt_parts[i] = gt_parts[i].to(device).float()
+    gt_motion = gt_motion.to(device).float()
+
     if args.lgvq > 0:
         cond = [text_feature, text_id, text_mask, motion_mask]
         # print(args.vision, "cond = [text_feature, text_id, text_mask, motion_mask]")
@@ -271,15 +319,15 @@ for nb_iter in range(1, args.warm_up_iter):
     else:
         cond = text
         motion_mask = None
-        # print(args.vision, "cond = text")
-    # preprocess_end_time = time.time()
-
-    # forward_start_time = time.time()
-    pred_parts, loss_commit_list, perplexity_list, loss_extend = net(gt_parts, cond)
-    # forward_end_time = time.time()
-
-    # loss_calc_start_time = time.time()
-    # contrastive_loss = loss_extend['contrastive']
+    # time1 = time.time()
+    motion, loss_commit_list, perplexity_list, loss_extend = net(gt_motion, cond)
+    # time2 = time.time()
+    # print(f"time1: {(time2 - time1) * 1000}ms")
+    batch_size = gt_motion.shape[0]
+    pred_parts = dataset_VQ_bodypart_text.whole2parts_batch(motion[0])
+    gt_parts = dataset_VQ_bodypart_text.whole2parts_batch(gt_motion)
+    # time3 = time.time()
+    # print(f"time2: {(time3 - time2) * 1000}ms")
     if isinstance(loss_extend, list):
         contrastive_loss = loss_extend[0]
         if isinstance(loss_extend[1], list):
@@ -288,27 +336,28 @@ for nb_iter in range(1, args.warm_up_iter):
             disentangle_loss = loss_extend[1]
     else:
         contrastive_loss = loss_extend
-        disentangle_loss = torch.tensor(0.0).cuda()
+        disentangle_loss = torch.tensor(0.0).to(device)
+    # time4 = time.time()
+    # print(f"time3: {(time4 - time3) * 1000}ms")
     pred_parts_vel = dataset_VQ_bodypart_text.get_each_part_vel(
         pred_parts, mode=args.dataname)
     gt_parts_vel = dataset_VQ_bodypart_text.get_each_part_vel(
         gt_parts, mode=args.dataname)
-
+    # time5 = time.time()
+    # print(f"time4: {(time5 - time4) * 1000}ms")
     loss_motion_list = Loss(pred_parts, gt_parts, motion_mask)  # parts motion reconstruction loss
     loss_vel_list = Loss.forward_vel(pred_parts_vel, gt_parts_vel, motion_mask)  # parts velocity recon loss
-
     loss_motion = losses.gather_loss_list(loss_motion_list)
     loss_commit = losses.gather_loss_list(loss_commit_list)
     loss_vel = losses.gather_loss_list(loss_vel_list)
-
+    # time6 = time.time()
+    # print(f"time5: {(time6 - time5) * 1000}ms")
     loss = loss_motion + args.commit * loss_commit + args.loss_vel * loss_vel + contrastive_loss * args.contrastive + disentangle_loss * args.Disentangle
-    # loss_calc_end_time = time.time()
+    
 
-    # backward_start_time = time.time()
     optimizer.zero_grad()
     loss.backward()
     optimizer.step()
-    # backward_end_time = time.time()
 
     avg_recons += loss_motion.item()
     perplexity = losses.gather_loss_list(perplexity_list)
@@ -316,19 +365,9 @@ for nb_iter in range(1, args.warm_up_iter):
     avg_commit += loss_commit.item()
     avg_contrastive += contrastive_loss.item()
     avg_disentangle += disentangle_loss.item()
-    
-    # iter_end_time = time.time() # 迭代结束时间
-
-    # if nb_iter % args.print_iter == 0 and args.vision == 26: # 只在 vision=26 时打印详细时间
-    #     print(f"Warmup Iter {nb_iter} Timing Analysis (vision=26):")
-    #     print(f"  Data Loading: {(data_load_end_time - data_load_start_time)*1000:.2f} ms")
-    #     print(f"  Preprocessing: {(preprocess_end_time - preprocess_start_time)*1000:.2f} ms")
-    #     print(f"  Forward Pass: {(forward_end_time - forward_start_time)*1000:.2f} ms")
-    #     print(f"  Loss Calculation: {(loss_calc_end_time - loss_calc_start_time)*1000:.2f} ms")
-    #     print(f"  Backward & Optim: {(backward_end_time - backward_start_time)*1000:.2f} ms")
-    #     print(f"  Total Iter Time: {(iter_end_time - iter_start_time)*1000:.2f} ms")
-
-    if nb_iter % args.print_iter == 0:
+    # time7 = time.time()
+    # print(f"time6: {(time7 - time6) * 1000}ms")
+    if nb_iter % args.print_iter == 0 and rank == 0:
         avg_recons /= args.print_iter
         avg_perplexity /= args.print_iter
         avg_commit /= args.print_iter
@@ -355,27 +394,26 @@ avg_recons, avg_perplexity, avg_commit = 0., 0., 0.
 avg_contrastive, avg_disentangle = 0., 0.
 
 for nb_iter in range(1, args.total_iter + 1):
-    # iter_start_time = time.time() # 迭代开始时间
+    if args.ddp: 
+        train_loader.sampler.set_epoch(nb_iter)  # 确保shuffle正确
     # if args.ddp: train_loader.sampler.set_epoch(nb_iter)
     batch = next(train_loader_iter)
-    if args.vision != 26:
-        if len(batch) == 3:
-            gt_parts, text, text_id = batch
-        elif len(batch) == 6:   
-            gt_parts, text, text_token, text_feature, text_feature_all, text_id = batch
-        elif len(batch) == 7:
-            gt_parts, text, text_token, text_feature, text_feature_all, text_id, text_mask = batch
-        elif len(batch) == 8:
-            gt_parts, text, text_token, text_feature, text_feature_all, text_id, text_mask, motion_mask = batch
-        else:
-            raise ValueError("The length of batch is not correct.")
-        
+    if len(batch) == 3:
+        gt_motion, text, text_id = batch
+    elif len(batch) == 6:   
+        gt_motion, text, text_token, text_feature, text_feature_all, text_id = batch
+    elif len(batch) == 7:
+        gt_motion, text, text_token, text_feature, text_feature_all, text_id, text_mask = batch
+    elif len(batch) == 8:
+        gt_motion, text, text_token, text_feature, text_feature_all, text_id, text_mask, motion_mask = batch
+    elif len(batch) == 9:
+        gt_motion, text, text_token, text_feature, text_feature_all, text_id, text_mask, motion_mask, gt_parts = batch
+        # motion_mask = motion_mask.to(gt_parts[0].device).bool()
     else:
-        gt_parts = batch
-        text_feature, text_id, text_mask, motion_mask = None, None, None, None
-        # gt_parts = gt_parts.to(device).float()
-    for i in range(len(gt_parts)):
-        gt_parts[i] = gt_parts[i].cuda().float()
+        raise ValueError("The length of batch is not correct.")
+    # for i in range(len(gt_parts)):
+    #     gt_parts[i] = gt_parts[i].to(device).float()
+    gt_motion = gt_motion.to(device).float()
     if args.lgvq > 0:
         cond = [text_feature, text_id, text_mask, motion_mask]
         if nb_iter > args.sem_iter and train_loader.dataset.strategy == 'basic' :
@@ -388,13 +426,14 @@ for nb_iter in range(1, args.total_iter + 1):
     else:
         cond = text
         motion_mask = None
-    # preprocess_end_time = time.time()
-
-    # forward_start_time = time.time()
-    pred_parts, loss_commit_list, perplexity_list, loss_extend = net(gt_parts, cond)
-    # forward_end_time = time.time()
-
-    # loss_calc_start_time = time.time()
+    motion, loss_commit_list, perplexity_list, loss_extend = net(gt_motion, cond)
+    batch_size = gt_motion.shape[0]
+    # pred_parts = [[] for _ in range(6)]
+    # for i in range(batch_size):
+    #     for j in range(6):
+    #         pred_parts[j].append(dataset_VQ_bodypart_text.whole2parts(motion[0][i])[j].unsqueeze(0))
+    pred_parts = dataset_VQ_bodypart_text.whole2parts_batch(motion[0])
+    gt_parts = dataset_VQ_bodypart_text.whole2parts_batch(gt_motion)
     if isinstance(loss_extend, list):
         contrastive_loss = loss_extend[0]
         if isinstance(loss_extend[1], list):
@@ -403,7 +442,7 @@ for nb_iter in range(1, args.total_iter + 1):
             disentangle_loss = loss_extend[1]
     else:
         contrastive_loss = loss_extend
-        disentangle_loss = torch.tensor(0.0).cuda()
+        disentangle_loss = torch.tensor(0.0).to(device)
     pred_parts_vel = dataset_VQ_bodypart_text.get_each_part_vel(
         pred_parts, mode=args.dataname)
     gt_parts_vel = dataset_VQ_bodypart_text.get_each_part_vel(
@@ -418,16 +457,13 @@ for nb_iter in range(1, args.total_iter + 1):
     loss_vel = losses.gather_loss_list(loss_vel_list)
 
     loss = loss_motion + args.commit * loss_commit + args.loss_vel * loss_vel + contrastive_loss * args.contrastive  + disentangle_loss * args.Disentangle
-    # loss_calc_end_time = time.time()
     
-    # backward_start_time = time.time()
     optimizer.zero_grad()
     loss.backward()
     if args.clip_grad is not None:
         torch.nn.utils.clip_grad_norm_(net.parameters(), args.clip_grad)
     optimizer.step()
     scheduler.step()
-    # backward_end_time = time.time()
     
     avg_recons += loss_motion.item()
     perplexity = losses.gather_loss_list(perplexity_list)
@@ -436,17 +472,7 @@ for nb_iter in range(1, args.total_iter + 1):
     avg_contrastive += contrastive_loss.item()
     avg_disentangle += disentangle_loss.item()
     
-    # iter_end_time = time.time() # 迭代结束时间
-
-    # if nb_iter % args.print_iter == 0 and args.vision == 26: # 只在 vision=26 时打印详细时间
-    #     print(f"Train Iter {nb_iter} Timing Analysis (vision=26):")
-    #     print(f"  Data Loading: {(preprocess_end_time - preprocess_start_time)*1000:.2f} ms")
-    #     print(f"  Forward Pass: {(forward_end_time - forward_start_time)*1000:.2f} ms")
-    #     print(f"  Loss Calculation: {(loss_calc_end_time - loss_calc_start_time)*1000:.2f} ms")
-    #     print(f"  Backward & Optim: {(backward_end_time - backward_start_time)*1000:.2f} ms")
-    #     print(f"  Total Iter Time: {(iter_end_time - iter_start_time)*1000:.2f} ms")
-
-    if nb_iter % args.print_iter == 0:
+    if nb_iter % args.print_iter == 0 and rank == 0:
         avg_recons /= args.print_iter
         avg_perplexity /= args.print_iter
         avg_commit /= args.print_iter
@@ -464,7 +490,7 @@ for nb_iter in range(1, args.total_iter + 1):
         avg_recons, avg_perplexity, avg_commit = 0., 0., 0.,
         avg_contrastive, avg_disentangle = 0., 0.
 
-    if nb_iter % args.eval_iter == 0:
+    if nb_iter % args.eval_iter == 0 and rank == 0:
         best_fid, best_iter, best_div, best_top1, best_top2, best_top3, best_matching, writer, logger, best_mpjpe = \
             eval_bodypart.evaluation_vqvae(
                 args.run_dir, val_loader, net, logger, writer, nb_iter,

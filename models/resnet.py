@@ -1,6 +1,5 @@
 import torch.nn as nn
 import torch
-# from models.encdec import RepeatFirstElementPad1d
 
 class nonlinearity(nn.Module):
     def __init__(self):
@@ -15,6 +14,7 @@ class ResConv1DBlock(nn.Module):
         super().__init__()
         padding = dilation
         self.norm = norm
+        self.causal = causal
         if norm == "LN":
             self.norm1 = nn.LayerNorm(n_in)
             self.norm2 = nn.LayerNorm(n_in)
@@ -40,20 +40,16 @@ class ResConv1DBlock(nn.Module):
         elif activation == "gelu":
             self.activation1 = nn.GELU()
             self.activation2 = nn.GELU()
-
-    #     self.conv1 = nn.Conv1d(n_in, n_state, 3, 1, padding, dilation)
-    #     self.conv2 = nn.Conv1d(n_state, n_in, 1, 1, 0,)     
-        # 因果卷积的特殊处理
+            
+        
         if causal:
-            # 因果卷积需要左侧填充
-            self.pad = RepeatFirstElementPad1d(padding=dilation * 2)  # 左侧填充2*dilation
-            self.conv1 = nn.Conv1d(n_in, n_state, 3, 1, 0, dilation)  # padding=0
+            self.causal_pad = nn.ConstantPad1d(( (3-1)*dilation, 0 ), 0)  # 左侧填充
+            self.conv1 = nn.Conv1d(n_in, n_state, 3, 1, dilation=dilation, padding=0)
+            self.conv2 = nn.Conv1d(n_state, n_in, 1, 1, 0,)
         else:
-            # 非因果卷积使用对称填充
-            self.pad = nn.Identity()
-            self.conv1 = nn.Conv1d(n_in, n_state, 3, 1, dilation, dilation)
-        # 第二层卷积（1x1卷积，不需要考虑因果性）
-        self.conv2 = nn.Conv1d(n_state, n_in, 1, 1, 0)
+            self.conv1 = nn.Conv1d(n_in, n_state, 3, 1, padding, dilation)
+            self.conv2 = nn.Conv1d(n_state, n_in, 1, 1, 0,)     
+
 
     def forward(self, x):
         x_orig = x
@@ -63,8 +59,9 @@ class ResConv1DBlock(nn.Module):
         else:
             x = self.norm1(x)
             x = self.activation1(x)
-        
-        x = self.pad(x)
+            
+        if self.causal:
+            x = self.causal_pad(x)
         x = self.conv1(x)
 
         if self.norm == "LN":
