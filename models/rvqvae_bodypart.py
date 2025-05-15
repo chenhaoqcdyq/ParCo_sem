@@ -4,7 +4,7 @@ from einops import rearrange
 from sentence_transformers import SentenceTransformer
 import torch
 import torch.nn as nn
-from models.encdec import Decoder_cnn, Decoder_wo_upsamplev1, Decoder_wo_upsamplev2, Encoder, Decoder, Encoder_cnn, Encoderv2, EnhancedDecoder, Decoder_wo_upsample, PureMotionDecoder
+from models.encdec import Decoder_cnn, Decoder_wo_upsamplev1, Decoder_wo_upsamplev2, Encoder, Decoder, Encoder_cnn, Encoderv2, EnhancedDecoder, Decoder_wo_upsample, MultiPartEncoder, PureMotionDecoder
 import torch.nn.functional as F
 from models.lgvq import LGVQ, CausalTransformerEncoder, ContrastiveLossWithSTS, ContrastiveLossWithSTSV2, Dualsem_encoder, Dualsem_encoderv2, Dualsem_encoderv3, LGVQv2, LGVQv3, LGVQv4, LGVQv5, TemporalDownsamplerV3
 from models.quantize_cnn import QuantizeEMAReset, Quantizer, QuantizeEMA, QuantizeReset
@@ -60,15 +60,21 @@ class VQVAE_bodypart(nn.Module):
                 'R_Arm': 60,
                 'L_Arm': 60,
             }
+            if 'interaction' in args and args.interaction == 1:
+                self.interaction = True
+                self.encoder = MultiPartEncoder(parts_input_dims_dict=parts_input_dim, common_hidden_dim=parts_hidden_dim['Root'], parts_output_dims_dict=parts_output_dim, down_t=down_t, stride_t=stride_t, depth=depth, dilation_growth_rate=dilation_growth_rate, activation=activation, norm=norm, causal=causal, enable_interaction=args.interaction if 'interaction' in args else False)
+            else:
+                self.interaction = False
             self.parts_input_dim = parts_input_dim
             for name in self.parts_name:
                 raw_dim = parts_input_dim[name]
                 hidden_dim = parts_hidden_dim[name]
                 output_dim = parts_output_dim[name]
-
-                encoder = Encoder_cnn(raw_dim, output_dim, down_t, stride_t, hidden_dim, depth, dilation_growth_rate, activation=activation, norm=norm, causal=causal)
+                if 'interaction' not in args or args.interaction == 0:
+                    encoder = Encoder_cnn(raw_dim, output_dim, down_t, stride_t, hidden_dim, depth, dilation_growth_rate, activation=activation, norm=norm, causal=causal)
+                    setattr(self, f'enc_{name}', encoder)
                 decoder = Decoder_cnn(raw_dim, output_dim, down_t, stride_t, hidden_dim, depth, dilation_growth_rate, activation=activation, norm=norm)
-                setattr(self, f'enc_{name}', encoder)
+                
                 setattr(self, f'dec_{name}', decoder)
 
                 code_dim = parts_code_dim[name]
@@ -95,14 +101,14 @@ class VQVAE_bodypart(nn.Module):
                 'L_Arm': 48,
             }
             self.parts_input_dim = parts_input_dim
+            self.encoder = MultiPartEncoder(parts_input_dims_dict=parts_input_dim, common_hidden_dim=parts_hidden_dim['Root'], parts_output_dims_dict=parts_output_dim, down_t=down_t, stride_t=stride_t, depth=depth, dilation_growth_rate=dilation_growth_rate, activation=activation, norm=norm, causal=causal, enable_interaction=args.interaction if 'interaction' in args else False)
             for name in self.parts_name:
                 raw_dim = parts_input_dim[name]
                 hidden_dim = parts_hidden_dim[name]
                 output_dim = parts_output_dim[name]
 
-                encoder = Encoder_cnn(raw_dim, output_dim, down_t, stride_t, hidden_dim, depth, dilation_growth_rate, activation=activation, norm=norm, causal=causal)
+                # encoder = Encoder_cnn(raw_dim, output_dim, down_t, stride_t, hidden_dim, depth, dilation_growth_rate, activation=activation, norm=norm, causal=causal)
                 decoder = Decoder_cnn(raw_dim, output_dim, down_t, stride_t, hidden_dim, depth, dilation_growth_rate, activation=activation, norm=norm)
-                setattr(self, f'enc_{name}', encoder)
                 setattr(self, f'dec_{name}', decoder)
 
                 code_dim = parts_code_dim[name]
@@ -190,45 +196,51 @@ class VQVAE_bodypart(nn.Module):
         :return:
         """
 
-        # [Note] remember to be consistent with the self.parts_name when use the x.
-        #   self.parts_name: ['Root', 'R_Leg', 'L_Leg', 'Backbone', 'R_Arm', 'L_Arm']
-
         assert isinstance(parts, list)
         assert len(parts) == len(self.parts_name)
+
+        # 1. Preprocess inputs for the MultiPartEncoder
+        # Each part tensor in 'parts' is (B, T, C_raw)
+        # self.preprocess permutes it to (B, C_raw, T)
+        preprocessed_parts_for_encoder = [self.preprocess(p) for p in parts]
+
+        # 2. Encode all parts using the MultiPartEncoder
+        # Output is a list of tensors, each (B, C_encoded, T_encoded)
+        if self.interaction:
+            encoded_features_list = self.encoder(preprocessed_parts_for_encoder)
 
         x_out_list = []
         loss_list = []
         perplexity_list = []
-        for i, name in enumerate(self.parts_name):  # parts_name: ['Root', 'R_Leg', 'L_Leg', 'Backbone', 'R_Arm', 'L_Arm']
 
-            x = parts[i]
-            # Preprocess
-            x_in = self.preprocess(x)  # (B, nframes, in_dim) ==> (B, in_dim, nframes)
-
-            # Encode
-            encoder = getattr(self, f'enc_{name}')
-            x_encoder = encoder(x_in)
+        # 3. Iterate for Quantization and Decoding for each part
+        for i, name in enumerate(self.parts_name):
+            if self.interaction:
+                current_part_encoded = encoded_features_list[i] # This is (B, C_encoded, T_encoded)
+            else:
+                encoder = getattr(self, f'enc_{name}')
+                current_part_encoded = encoder(preprocessed_parts_for_encoder[i])
 
             # Quantization
             quantizer = getattr(self, f'quantizer_{name}')
-            x_quantized, loss, perplexity = quantizer(x_encoder)
+            # Quantizer expects (B, C_encoded, T_encoded)
+            x_quantized, loss, perplexity = quantizer(current_part_encoded)
 
             # Decoder
             decoder = getattr(self, f'dec_{name}')
-            # time_decoder_start = time.time()
-            x_decoder = decoder(x_quantized)
-            # time_decoder_end = time.time()
-            # print(f"Decoder time: {(time_decoder_end - time_decoder_start) * 1000} ms")
-            # self.dec_R_Leg(x_quantized)
+            # Decoder expects (B, C_quantized, T_encoded) and outputs (B, C_raw, T_original)
+            x_decoded_permuted = decoder(x_quantized)
+
             # Postprocess
-            x_out = self.postprocess(x_decoder)  # (B, in_dim, nframes) ==> (B, nframes, in_dim)
+            # self.postprocess permutes (B, C_raw, T_original) to (B, T_original, C_raw)
+            x_out = self.postprocess(x_decoded_permuted)
 
             x_out_list.append(x_out)
             loss_list.append(loss)
             perplexity_list.append(perplexity)
 
         # Return the list of x_out, loss, perplexity
-        return x_out_list, loss_list, perplexity_list, torch.tensor(0.0)
+        return x_out_list, loss_list, perplexity_list, torch.tensor(0.0, device=parts[0].device)
 
 
     def forward_decoder(self, parts):
