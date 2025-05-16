@@ -2935,60 +2935,61 @@ class Dualsem_encoderv4(nn.Module):
         cls_token, loss_commit, perplexity = self.sem_quantizer(feature[:, :, 0, :].permute(0,2,1))
         cls_token = cls_token.permute(0,2,1)
         global_feat = cls_token.mean(dim=1)
-        
+        contrastive_loss = torch.tensor(0.0).to(parts_feature[0].device)
+        mlm_loss = torch.tensor(0.0).to(parts_feature[0].device)
         if text is not None:
             text_feature, text_id = text
-            if text_mask is not None:
-                input_ids = text_mask['input_ids'].to(parts_feature[0].device)
-                labels = text_mask['labels'].to(parts_feature[0].device).float()
-                attention_mask = text_mask['attention_mask'].to(parts_feature[0].device).bool()
-                
-                with torch.no_grad():
-                    bert_outputs = self.bert_model(
-                        input_ids=input_ids,
-                        attention_mask=attention_mask
-                    )
-                    text_feature = bert_outputs.last_hidden_state.to(parts_feature[0].device).float()
-                    text_feature_pooler = text_mask['feature'].to(parts_feature[0].device).float()
+            if text_feature is not None and text_id is not None:
+                if text_mask is not None:
+                    input_ids = text_mask['input_ids'].to(parts_feature[0].device)
+                    labels = text_mask['labels'].to(parts_feature[0].device).float()
+                    attention_mask = text_mask['attention_mask'].to(parts_feature[0].device).bool()
                     
-            # 特征投影
-            text_feature = text_feature.to(parts_feature[0].device).float()
-            text_query = self.text_proj(text_feature)
-            motion_feature_global = self.motion_text_proj(global_feat)
-            motion_query = self.motion_all_proj(cls_token)
-            if self.ifdown_sample:
-                motion_mask = motion_mask[:, ::4]
-            # 跨模态注意力
-            for layer in self.cross_attn_layers:
-                text_query = layer(
-                    tgt=text_query,
-                    memory=motion_query,
-                    tgt_mask=None,
-                    memory_mask=None,
-                    memory_key_padding_mask=~motion_mask,
-                    tgt_key_padding_mask=~attention_mask,
-                )
+                    with torch.no_grad():
+                        bert_outputs = self.bert_model(
+                            input_ids=input_ids,
+                            attention_mask=attention_mask
+                        )
+                        text_feature = bert_outputs.last_hidden_state.to(parts_feature[0].device).float()
+                        text_feature_pooler = text_mask['feature'].to(parts_feature[0].device).float()
+                        
+                # 特征投影
+                text_feature = text_feature.to(parts_feature[0].device).float()
+                text_query = self.text_proj(text_feature)
+                motion_feature_global = self.motion_text_proj(global_feat)
+                motion_query = self.motion_all_proj(cls_token)
+                if self.ifdown_sample:
+                    motion_mask = motion_mask[:, ::4]
+                # 跨模态注意力
+                for layer in self.cross_attn_layers:
+                    text_query = layer(
+                        tgt=text_query,
+                        memory=motion_query,
+                        tgt_mask=None,
+                        memory_mask=None,
+                        memory_key_padding_mask=~motion_mask,
+                        tgt_key_padding_mask=~attention_mask,
+                    )
+                    
+                # MLM预测
+                logits = self.mlm_head(text_query)
                 
-            # MLM预测
-            logits = self.mlm_head(text_query)
+                # 标签平滑的MLM损失
+                # loss_fct = LabelSmoothingCrossEntropy(smoothing=0.05)
+                # active_loss = (labels != -100).view(-1)
+                # active_logits = logits.view(-1, self.vocab_size)[active_loss]
+                # active_labels = labels.view(-1)[active_loss]
+                # mlm_loss = loss_fct(active_logits, active_labels.long())
+                loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
+                active_loss = (labels != -100).view(-1)
+                active_logits = logits.view(-1, self.vocab_size)[active_loss]
+                active_labels = labels.view(-1)[active_loss]
+                mlm_loss = loss_fct(active_logits, active_labels.long())
+                # 对比损失
+                text_feature_pooler = self.text_motion_proj(text_feature_pooler)
+                contrastive_loss = self.contrastive_loss(motion_feature_global, text_feature_pooler, text_id)
+        # else:
             
-            # 标签平滑的MLM损失
-            # loss_fct = LabelSmoothingCrossEntropy(smoothing=0.05)
-            # active_loss = (labels != -100).view(-1)
-            # active_logits = logits.view(-1, self.vocab_size)[active_loss]
-            # active_labels = labels.view(-1)[active_loss]
-            # mlm_loss = loss_fct(active_logits, active_labels.long())
-            loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
-            active_loss = (labels != -100).view(-1)
-            active_logits = logits.view(-1, self.vocab_size)[active_loss]
-            active_labels = labels.view(-1)[active_loss]
-            mlm_loss = loss_fct(active_logits, active_labels.long())
-            # 对比损失
-            text_feature_pooler = self.text_motion_proj(text_feature_pooler)
-            contrastive_loss = self.contrastive_loss(motion_feature_global, text_feature_pooler, text_id)
-        else:
-            contrastive_loss = torch.tensor(0.0).to(parts_feature[0].device)
-            mlm_loss = torch.tensor(0.0).to(parts_feature[0].device)
         
         return cls_token, [contrastive_loss, mlm_loss], [loss_commit, perplexity]
     
