@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 from models.encdec import Decoder_cnn, Decoder_wo_upsamplev1, Decoder_wo_upsamplev2, Encoder, Decoder, Encoder_cnn, Encoderv2, EnhancedDecoder, Decoder_wo_upsample, MultiPartEncoder, PureMotionDecoder
 import torch.nn.functional as F
-from models.lgvq import LGVQ, CausalTransformerEncoder, ContrastiveLossWithSTS, ContrastiveLossWithSTSV2, Dualsem_encoder, Dualsem_encoderv2, Dualsem_encoderv3, LGVQv2, LGVQv3, LGVQv4, LGVQv5, TemporalDownsamplerV3
+from models.lgvq import LGVQ, CausalTransformerEncoder, ContrastiveLossWithSTS, ContrastiveLossWithSTSV2, Dualsem_encoder, Dualsem_encoderv2, Dualsem_encoderv3, Dualsem_encoderv4, LGVQv2, LGVQv3, LGVQv4, LGVQv5, TemporalDownsamplerV3
 from models.quantize_cnn import QuantizeEMAReset, Quantizer, QuantizeEMA, QuantizeReset
 from models.residual_vq import ResidualVQ
 # from transformers import CLIPTextModel, CLIPTokenizer  # 使用Hugging Face版本
@@ -32,8 +32,7 @@ class VQVAE_bodypart(nn.Module):
                  depth=3,
                  dilation_growth_rate=3,
                  activation='relu',
-                 norm=None,
-                 dual_vision=0):
+                 norm=None):
         
         super().__init__()
         self.parts_name = ['Root', 'R_Leg', 'L_Leg', 'Backbone', 'R_Arm', 'L_Arm']
@@ -128,10 +127,10 @@ class VQVAE_bodypart(nn.Module):
         
         else:
             raise Exception()
-        
-        self.dual_vision = dual_vision
+        self.args = args
+        self.dual_vision = args.lgvq
         if self.dual_vision == 1:
-            self.dual_encoder = Dualsem_encoderv3(d_model=self.parts_hidden_dim['Backbone'], )
+            self.dual_encoder = Dualsem_encoderv4(args, d_model=self.parts_hidden_dim['Backbone'], down_sample=True, causal=True)
 
     def preprocess(self, x):
         # (bs, T, Jx3) -> (bs, Jx3, T)
@@ -207,15 +206,29 @@ class VQVAE_bodypart(nn.Module):
         # Each part tensor in 'parts' is (B, T, C_raw)
         # self.preprocess permutes it to (B, C_raw, T)
         preprocessed_parts_for_encoder = [self.preprocess(p) for p in parts]
-
+        x_out_list = []
+        loss_list = []
+        perplexity_list = []
+        loss_sem = torch.tensor(0.0, device=parts[0].device)
+        if self.args.lgvq>=1 and caption is not None and len(caption) == 4:
+            text_feature, text_id, text_mask, motion_mask = caption
+        else:
+            text_feature, text_id, text_mask, motion_mask = None, None, None, None
         # 2. Encode all parts using the MultiPartEncoder
         # Output is a list of tensors, each (B, C_encoded, T_encoded)
         if self.interaction:
             encoded_features_list = self.encoder(preprocessed_parts_for_encoder)
-
-        x_out_list = []
-        loss_list = []
-        perplexity_list = []
+            if self.dual_vision == 1:
+                dual_encoder_input = [self.preprocess(p) for p in encoded_features_list]
+                if self.args.down_t == 2 and motion_mask is not None:
+                    motion_mask = motion_mask[:, ::4]
+                elif self.args.down_t == 1 and motion_mask is not None:
+                    motion_mask = motion_mask[:, ::2]
+                cls_token, loss_sem, commit_perplexity = self.dual_encoder(dual_encoder_input, [text_feature, text_id], text_mask, motion_mask)
+                # contrastive_loss, mlm_loss = loss_sem
+                loss_commit_sem, perplexity_sem = commit_perplexity
+                loss_list.append(loss_commit_sem)
+                perplexity_list.append(perplexity_sem)
 
         # 3. Iterate for Quantization and Decoding for each part
         for i, name in enumerate(self.parts_name):
@@ -244,7 +257,7 @@ class VQVAE_bodypart(nn.Module):
             perplexity_list.append(perplexity)
 
         # Return the list of x_out, loss, perplexity
-        return x_out_list, loss_list, perplexity_list, torch.tensor(0.0, device=parts[0].device)
+        return x_out_list, loss_list, perplexity_list, loss_sem
 
 
     def forward_decoder(self, parts):

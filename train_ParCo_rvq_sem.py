@@ -243,7 +243,7 @@ for nb_iter in range(1, args.warm_up_iter):
     # data_load_end_time = time.time()
     
     # preprocess_start_time = time.time()
-    if args.vision != 26:
+    if args.vision != 26 or args.lgvq == 1:
         if len(batch) == 3:
             gt_parts, text, text_id = batch
         elif len(batch) == 6:   
@@ -254,7 +254,6 @@ for nb_iter in range(1, args.warm_up_iter):
             gt_parts, text, text_token, text_feature, text_feature_all, text_id, text_mask, motion_mask = batch
         else:
             raise ValueError("The length of batch is not correct.")
-        
     else:
         gt_parts = batch
         text_feature, text_id, text_mask, motion_mask = None, None, None, None
@@ -358,7 +357,7 @@ for nb_iter in range(1, args.total_iter + 1):
     # iter_start_time = time.time() # 迭代开始时间
     # if args.ddp: train_loader.sampler.set_epoch(nb_iter)
     batch = next(train_loader_iter)
-    if args.vision != 26:
+    if args.vision != 26 or args.lgvq == 1:
         if len(batch) == 3:
             gt_parts, text, text_id = batch
         elif len(batch) == 6:   
@@ -369,7 +368,6 @@ for nb_iter in range(1, args.total_iter + 1):
             gt_parts, text, text_token, text_feature, text_feature_all, text_id, text_mask, motion_mask = batch
         else:
             raise ValueError("The length of batch is not correct.")
-        
     else:
         gt_parts = batch
         text_feature, text_id, text_mask, motion_mask = None, None, None, None
@@ -378,8 +376,8 @@ for nb_iter in range(1, args.total_iter + 1):
         gt_parts[i] = gt_parts[i].cuda().float()
     if args.lgvq > 0:
         cond = [text_feature, text_id, text_mask, motion_mask]
-        if nb_iter > args.sem_iter and train_loader.dataset.strategy == 'basic' :
-            train_loader.dataset.strategy = 'medium'
+        if nb_iter > args.sem_iter and train_loader.dataset.strategy == 'medium' :
+            train_loader.dataset.strategy = 'advanced'
             train_loader_iter = dataset_VQ_bodypart_text.cycle(train_loader)
             
     elif args.vision >= 17:
