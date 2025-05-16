@@ -32,7 +32,8 @@ class VQVAE_bodypart(nn.Module):
                  depth=3,
                  dilation_growth_rate=3,
                  activation='relu',
-                 norm=None):
+                 norm=None,
+                 dual_vision=0):
         
         super().__init__()
         self.parts_name = ['Root', 'R_Leg', 'L_Leg', 'Backbone', 'R_Arm', 'L_Arm']
@@ -62,7 +63,7 @@ class VQVAE_bodypart(nn.Module):
             }
             if 'interaction' in args and args.interaction == 1:
                 self.interaction = True
-                self.encoder = MultiPartEncoder(parts_input_dims_dict=parts_input_dim, common_hidden_dim=parts_hidden_dim['Root'], parts_output_dims_dict=parts_output_dim, down_t=down_t, stride_t=stride_t, depth=depth, dilation_growth_rate=dilation_growth_rate, activation=activation, norm=norm, causal=causal, enable_interaction=args.interaction if 'interaction' in args else False)
+                self.encoder = MultiPartEncoder(parts_input_dims_dict=parts_input_dim, common_hidden_dim=parts_hidden_dim['Backbone'], parts_output_dims_dict=parts_output_dim, down_t=down_t, stride_t=stride_t, depth=depth, dilation_growth_rate=dilation_growth_rate, activation=activation, norm=norm, causal=causal, enable_interaction=args.interaction if 'interaction' in args else False)
             else:
                 self.interaction = False
             self.parts_input_dim = parts_input_dim
@@ -127,7 +128,10 @@ class VQVAE_bodypart(nn.Module):
         
         else:
             raise Exception()
-
+        
+        self.dual_vision = dual_vision
+        if self.dual_vision == 1:
+            self.dual_encoder = Dualsem_encoderv3(d_model=self.parts_hidden_dim['Backbone'], )
 
     def preprocess(self, x):
         # (bs, T, Jx3) -> (bs, Jx3, T)

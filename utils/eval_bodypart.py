@@ -780,13 +780,14 @@ def calculate_frechet_feature_distance(feature_list1, feature_list2):
     )
     return dist
 
-from demo import Ours_MAGVIT2
+
 @torch.no_grad()        
 def evaluation_magvit2(out_dir, val_loader, net, logger, writer, nb_iter, best_fid, best_iter, best_div, best_top1, best_top2, best_top3, best_matching, eval_wrapper, draw = True, save = True, savegif=False, savenpy=False, best_mpjpe=1e9) : 
     """
     Evaluate the VQVAE, used in train and test.
     Compute the FID, DIV, and R-Precision.
     """
+    from demo import Ours_MAGVIT2
     net.eval()
     nb_sample = 0
     

@@ -16,7 +16,7 @@ from models.evaluator_wrapper import EvaluatorModelWrapper
 
 from options.get_eval_option import get_opt
 import options.option_vq_bodypart as option_vq
-from options.option_vq_bodypart import vqvae_bodypart_cfg, vqvae_bodypart_cfg_plus
+from options.option_vq_bodypart import vqvae_bodypart_cfg, vqvae_bodypart_cfg_plus, vqvae_bodypart_cfg_cnn
 
 import utils.losses as losses
 import utils.utils_model as utils_model
@@ -71,9 +71,9 @@ args = option_vq.get_args_parser()
 torch.manual_seed(args.seed)
 # args.vqvae_arch_cfg = vqvae_bodypart_cfg[args.vqvae_cfg]
 if args.bodyconfig == True:
-    args.vqvae_arch_cfg = vqvae_bodypart_cfg_plus[args.vqvae_cfg]
-else:
     args.vqvae_arch_cfg = vqvae_bodypart_cfg[args.vqvae_cfg]
+else:
+    args.vqvae_arch_cfg = vqvae_bodypart_cfg_cnn[args.vqvae_cfg]
 if args.lgvq > 0:
     from dataset import dataset_VQ_bodypart_text_mask_196 as dataset_VQ_bodypart_text
 elif args.vision == 26:

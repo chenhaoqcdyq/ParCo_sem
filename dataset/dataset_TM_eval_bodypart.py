@@ -95,7 +95,7 @@ class Text2MotionDataset(data.Dataset):
                     continue
 
 
-                if (len(motion)) < min_motion_len or (len(motion) >= 200):
+                if (len(motion)) < min_motion_len or (len(motion) >= self.max_motion_length + self.unit_length):
                     if self.print_warning:
                         print('Skip the motion:', name, '. motion length is shorter than min_motion_len or greater than 200.')
                     continue

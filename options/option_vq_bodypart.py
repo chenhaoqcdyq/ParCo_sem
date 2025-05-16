@@ -1,5 +1,43 @@
 import argparse
 
+vqvae_bodypart_cfg_cnn = {
+    'default': dict(
+        parts_code_nb={  # number of codes
+            'Root': 512,
+            'R_Leg': 512,
+            'L_Leg': 512,
+            'Backbone': 512,
+            'R_Arm': 512,
+            'L_Arm': 512,
+        },
+        parts_code_dim={  # Remember code_dim should be same to output_dim
+            'Root': 128,
+            'R_Leg': 128,
+            'L_Leg': 128,
+            'Backbone': 128,
+            'R_Arm': 128,
+            'L_Arm': 128,
+        },
+        parts_output_dim={  # dimension of encoder's output
+            'Root': 128,
+            'R_Leg': 128,
+            'L_Leg': 128,
+            'Backbone': 128,
+            'R_Arm': 128,
+            'L_Arm': 128,
+        },
+        parts_hidden_dim={  # hidden dimension of conv1d in encoder/decoder
+            'Root': 128,
+            'R_Leg': 128,
+            'L_Leg': 128,
+            'Backbone': 128,
+            'R_Arm': 128,
+            'L_Arm': 128,
+        }
+
+    ),
+
+}
 
 vqvae_bodypart_cfg = {
     'default': dict(
