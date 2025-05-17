@@ -4,7 +4,7 @@ from einops import rearrange
 from sentence_transformers import SentenceTransformer
 import torch
 import torch.nn as nn
-from models.encdec import Decoder_cnn, Decoder_wo_upsamplev1, Decoder_wo_upsamplev2, Encoder, Decoder, Encoder_cnn, Encoderv2, EnhancedDecoder, Decoder_wo_upsample, MultiPartEncoder, MultiPartEncoder_down2, PureMotionDecoder
+from models.encdec import Decoder_cnn, Decoder_wo_upsamplev1, Decoder_wo_upsamplev2, Encoder, Decoder, Encoder_cnn, Encoderv2, EnhancedDecoder, Decoder_wo_upsample, MultiPartEncoder, MultiPartEncoder_down2, MultiPartEncoder_wodown, PureMotionDecoder
 import torch.nn.functional as F
 from models.lgvq import LGVQ, CausalTransformerEncoder, ContrastiveLossWithSTS, ContrastiveLossWithSTSV2, Dualsem_encoder, Dualsem_encoderv2, Dualsem_encoderv3, Dualsem_encoderv4, LGVQv2, LGVQv3, LGVQv4, LGVQv5, TemporalDownsamplerV3
 from models.quantize_cnn import QuantizeEMAReset, Quantizer, QuantizeEMA, QuantizeReset
@@ -63,7 +63,10 @@ class VQVAE_bodypart(nn.Module):
             if 'interaction' in args and args.interaction == 1:
                 self.interaction = True
                 if down_t == 2:
-                    self.encoder = MultiPartEncoder(parts_input_dims_dict=parts_input_dim, common_hidden_dim=parts_hidden_dim['Backbone'], parts_output_dims_dict=parts_output_dim, down_t=down_t, stride_t=stride_t, depth=depth, dilation_growth_rate=dilation_growth_rate, activation=activation, norm=norm, causal=causal, enable_interaction=args.interaction if 'interaction' in args else False)
+                    if args.down_vqvae == 0:
+                        self.encoder = MultiPartEncoder_wodown(parts_input_dims_dict=parts_input_dim, common_hidden_dim=parts_hidden_dim['Backbone'], parts_output_dims_dict=parts_output_dim, down_t=down_t, stride_t=stride_t, depth=depth, dilation_growth_rate=dilation_growth_rate, activation=activation, norm=norm, causal=causal, enable_interaction=args.interaction if 'interaction' in args else False)
+                    else:
+                        self.encoder = MultiPartEncoder(parts_input_dims_dict=parts_input_dim, common_hidden_dim=parts_hidden_dim['Backbone'], parts_output_dims_dict=parts_output_dim, down_t=down_t, stride_t=stride_t, depth=depth, dilation_growth_rate=dilation_growth_rate, activation=activation, norm=norm, causal=causal, enable_interaction=args.interaction if 'interaction' in args else False)
                 elif down_t == 1:
                     self.encoder = MultiPartEncoder_down2(parts_input_dims_dict=parts_input_dim, common_hidden_dim=parts_hidden_dim['Backbone'], parts_output_dims_dict=parts_output_dim, down_t=down_t, stride_t=stride_t, depth=depth, dilation_growth_rate=dilation_growth_rate, activation=activation, norm=norm, causal=causal, enable_interaction=args.interaction if 'interaction' in args else False)
             else:
@@ -76,7 +79,10 @@ class VQVAE_bodypart(nn.Module):
                 if 'interaction' not in args or args.interaction == 0:
                     encoder = Encoder_cnn(raw_dim, output_dim, down_t, stride_t, hidden_dim, depth, dilation_growth_rate, activation=activation, norm=norm, causal=causal)
                     setattr(self, f'enc_{name}', encoder)
-                decoder = Decoder_cnn(raw_dim, output_dim, down_t, stride_t, hidden_dim, depth, dilation_growth_rate, activation=activation, norm=norm)
+                if args.down_vqvae == 0:
+                    decoder = Decoder_wo_upsample(raw_dim, output_dim, down_t, stride_t, hidden_dim, depth, dilation_growth_rate, activation=activation, norm=norm)
+                else:
+                    decoder = Decoder_cnn(raw_dim, output_dim, down_t, stride_t, hidden_dim, depth, dilation_growth_rate, activation=activation, norm=norm)
                 
                 setattr(self, f'dec_{name}', decoder)
 
