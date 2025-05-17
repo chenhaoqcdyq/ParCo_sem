@@ -55,7 +55,7 @@
         "--total-iter=300000",
         "--lr-scheduler=200000",
         "--vqvae-cfg=default",
-        "--down-t=2",
+        "--down-t=1",
         "--depth=3",
         "--dilation-growth-rate=3",
         "--vq-act=relu",
@@ -76,7 +76,7 @@
         // "--with_global=0",
         // "--text_dim=768",
         // "--resume-pth=output/00417-t2m-v11/VQVAE-v11-t2m-default/net_last.pth",
-        "--lgvq=1",
+        "--lgvq=0",
         // "--down_sample=1",
         // "--freeze_encdec=1",
         // "--with_global=0"

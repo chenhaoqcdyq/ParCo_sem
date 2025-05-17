@@ -962,3 +962,141 @@ class MultiPartEncoder(nn.Module):
         ]
             
         return output_part_features
+
+class MultiPartEncoder_down2(nn.Module):
+    def __init__(self,
+                 parts_input_dims_dict: dict,     # e.g., {'Root': 7, 'R_Leg': 50, ...}
+                 common_hidden_dim: int,          # Internal width for processing
+                 parts_output_dims_dict: dict,    # e.g., {'Root': 64, 'R_Leg': 64, ...}
+                 down_t: int,                     # Number of downsampling stages
+                 stride_t: int,                   # Stride for temporal downsampling in each stage
+                 depth: int,                      # Depth for Resnet1D blocks
+                 dilation_growth_rate: int,       # Dilation growth rate for Resnet1D
+                 activation: str = 'relu',
+                 norm: str = None,
+                 causal: bool = False,
+                 enable_interaction: bool = True):
+        super().__init__()
+
+        self.parts_name = ['Root', 'R_Leg', 'L_Leg', 'Backbone', 'R_Arm', 'L_Arm'] # Fixed order
+        self.num_parts = len(self.parts_name)
+        self.causal = causal
+        self.enable_interaction = enable_interaction
+
+        # 1. Initial convolutions for each part
+        self.initial_convs = nn.ModuleList()
+        for part_name in self.parts_name:
+            raw_dim = parts_input_dims_dict[part_name]
+            self.initial_convs.append(
+                _CausalPadAndConv1d(raw_dim, common_hidden_dim, kernel_size=3, stride=1, causal=self.causal)
+            )
+        
+        if activation.lower() == 'relu':
+            self.activation_fn = nn.ReLU()
+        elif activation.lower() == 'gelu':
+            self.activation_fn = nn.GELU()
+        else:
+            # Fallback or raise error
+            self.activation_fn = nn.ReLU()
+            print(f"Warning: Unsupported activation '{activation}', defaulting to ReLU.")
+
+        # 2. Downsampling stages with per-part processing and inter-part interaction
+        self.downsampling_stages = nn.ModuleList()
+        current_h_dim = common_hidden_dim # The dimension of features for parts
+        for i in range(2):
+            part_resnets_stage = nn.ModuleList()
+            part_down_convs_stage = nn.ModuleList()
+            
+            for i_part in range(self.num_parts):
+                part_resnets_stage.append(
+                    Resnet1D(current_h_dim, depth, dilation_growth_rate,
+                             activation=activation, norm=norm, causal=self.causal)
+                )
+                if i == 0:
+                    down_conv_kernel_size = stride_t * 2
+                    part_down_convs_stage.append(
+                        _CausalPadAndConv1d(current_h_dim, current_h_dim, 
+                                        kernel_size=down_conv_kernel_size,
+                                        stride=stride_t, causal=self.causal)
+                    )
+                else:
+                    part_down_convs_stage.append(
+                        nn.Identity()
+                    )
+            # Interaction ResNet: operates on 'current_h_dim' channels, across 'num_parts' sequence
+            # This interaction is NOT causal in the 'parts' dimension.
+            interaction_resnet_stage = Resnet1D(current_h_dim, depth, dilation_growth_rate,
+                                                activation=activation, norm=norm, causal=False) 
+
+            self.downsampling_stages.append(nn.ModuleDict({
+                'part_resnets': part_resnets_stage,
+                'part_down_convs': part_down_convs_stage,
+                'interaction_resnet': interaction_resnet_stage
+            }))
+
+        # 3. Final convolutions for each part
+        self.final_convs = nn.ModuleList()
+        for part_name in self.parts_name:
+            part_output_dim = parts_output_dims_dict[part_name]
+            self.final_convs.append(
+                _CausalPadAndConv1d(current_h_dim, part_output_dim, kernel_size=3, stride=1, causal=self.causal)
+            )
+
+    def forward(self, parts_data_list: list):
+        # Ensure parts_data_list has 6 tensors
+        if not isinstance(parts_data_list, list) or len(parts_data_list) != self.num_parts:
+            raise ValueError(f"Input must be a list of {self.num_parts} tensors.")
+
+        # Initial projection and activation
+        current_part_features = [
+            self.initial_convs[i](parts_data_list[i]) for i in range(self.num_parts)
+        ]
+        current_part_features = [self.activation_fn(feat) for feat in current_part_features]
+
+        # Downsampling and Interaction Loop
+        for stage_module in self.downsampling_stages:
+            # Per-part processing (ResNet + Downsampling Conv)
+            processed_in_stage = []
+            for i in range(self.num_parts):
+                x = current_part_features[i]
+                x = stage_module['part_resnets'][i](x)
+                x = stage_module['part_down_convs'][i](x)
+                processed_in_stage.append(x)
+            
+            if self.enable_interaction:
+                # Interaction step
+                # Features in processed_in_stage are (B, common_hidden_dim, T_current)
+                # Stack to (B, common_hidden_dim, num_parts, T_current)
+                try:
+                    stacked_for_interaction = torch.stack(processed_in_stage, dim=2)
+                except RuntimeError as e:
+                    # This might happen if T_current is not the same for all parts after downsampling,
+                    # which shouldn't occur if padding/stride is handled correctly.
+                    print(f"Error stacking features for interaction. Shapes: {[f.shape for f in processed_in_stage]}")
+                    raise e
+                
+                B, H, NumP, T_curr = stacked_for_interaction.shape
+                
+                # Reshape for ResNet1D: (Batch_eff, Channels, Seq_len_eff)
+                # Batch_eff = B * T_curr, Channels = H (common_hidden_dim), Seq_len_eff = NumP
+                to_interact_permuted = stacked_for_interaction.permute(0, 3, 1, 2).contiguous() # (B, T_curr, H, NumP)
+                to_interact_reshaped = to_interact_permuted.view(B * T_curr, H, NumP)
+                
+                interacted_features = stage_module['interaction_resnet'](to_interact_reshaped) # (B*T_curr, H, NumP)
+                
+                interacted_unreshaped = interacted_features.view(B, T_curr, H, NumP)
+                # Permute back to (B, H, NumP, T_curr)
+                interacted_permuted_back = interacted_unreshaped.permute(0, 2, 3, 1).contiguous() 
+                
+                # Unstack into a list of part features (B, H, T_curr)
+                current_part_features = list(torch.unbind(interacted_permuted_back, dim=2))
+            else:
+                # If interaction is disabled, use the per-part processed features directly
+                current_part_features = processed_in_stage
+
+        # Final projection
+        output_part_features = [
+            self.final_convs[i](current_part_features[i]) for i in range(self.num_parts)
+        ]
+            
+        return output_part_features
