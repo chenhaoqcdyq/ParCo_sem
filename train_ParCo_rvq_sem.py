@@ -188,7 +188,10 @@ if args.resume_pth:
             net.load_state_dict(new_ckpt, strict=False)
             print("load wo lgvq model")
     else:
-        net.load_state_dict(ckpt['net'], strict=False)
+        # net.load_state_dict(ckpt['net'], strict=False)
+        keys = net.load_state_dict(ckpt['net'], strict=False)
+        print("missing_keys",keys.missing_keys)
+        print("unexpected_keys",keys.unexpected_keys)
 
 net.train()       
 if args.freeze_encdec:

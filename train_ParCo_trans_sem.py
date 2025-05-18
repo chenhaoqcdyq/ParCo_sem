@@ -26,7 +26,7 @@ from models.evaluator_wrapper import EvaluatorModelWrapper
 import models.t2m_trans_bodypart as trans_bodypart
 import models.t2m_trans_multipart as trans_multipart
 
-from dataset import dataset_TM_train_bodypart
+# from dataset import dataset_TM_train_bodypart
 from dataset import dataset_TM_eval_bodypart
 from dataset import dataset_tokenize_bodypart
 
@@ -190,6 +190,10 @@ if not args.use_existing_vq_data:
             tok_p = tok_p.cpu().numpy()
             # use name[0] because the batch size is 1
             np.save(pjoin(args.vq_dir, name[0] + '_' + part_name + '.npy'), tok_p)
+        if vqvae_train_args.lgvq > 0:
+            sem_part = tokenized_parts[1]
+            sem_part = sem_part[0].cpu().numpy()
+            np.save(pjoin(args.vq_dir, name[0] + '_sem.npy'), sem_part)
 
 else:
     print('\n\n')
@@ -209,6 +213,10 @@ val_loader = dataset_TM_eval_bodypart.DATALoader(
     args.dataname, False, 32, w_vectorizer)
 
 print('\n\n===> Constructing dataset for training transformer...')
+if vqvae_train_args.lgvq>0:
+    import dataset.dataset_TM_train_bodypart_sem as dataset_TM_train_bodypart
+else:
+    import dataset.dataset_TM_train_bodypart as dataset_TM_train_bodypart
 # train loader
 train_loader = dataset_TM_train_bodypart.DATALoader(
     dataset_name=args.dataname, vq_dir=args.vq_dir, unit_length=unit_length, codebook_size=args.nb_code,
@@ -257,6 +265,7 @@ print('\n\n===> Constructing our bodypart transformer...')
 #     fusev2_head_mlp_num_layers=args.trans_arch_cfg['fusev2_head_mlp_num_layers'],
 
 # )
+semantic_len_max = ((196 // unit_length) + 3) // 4 + 1
 trans_encoder = trans_multipart.Text2Motion_Transformer(
     num_vq=args.nb_code,
     embed_dim=args.embed_dim_gpt,
@@ -266,8 +275,8 @@ trans_encoder = trans_multipart.Text2Motion_Transformer(
     n_head=args.n_head_gpt,
     drop_out_rate=args.drop_out_rate,
     fc_rate=args.ff_rate,
-    dual_head_flag=False,
-    semantic_len=50,
+    dual_head_flag=(vqvae_train_args.lgvq>0),
+    semantic_len=semantic_len_max,
     num_parts=6,
 )
 
@@ -298,6 +307,7 @@ avg_loss_cls = {
     'Backbone': 0.,
     'R_Arm': 0.,
     'L_Arm': 0.,
+    'sem': 0.,
 }
 avg_acc_determine = {
     'Root': 0.,
@@ -306,6 +316,7 @@ avg_acc_determine = {
     'Backbone': 0.,
     'R_Arm': 0.,
     'L_Arm': 0.,
+    'sem': 0.,
 }
 avg_acc_sample = {
     'Root': 0.,
@@ -314,6 +325,7 @@ avg_acc_sample = {
     'Backbone': 0.,
     'R_Arm': 0.,
     'L_Arm': 0.,
+    'sem': 0.,
 }
 right_num_determine = {
     'Root': 0,
@@ -322,6 +334,7 @@ right_num_determine = {
     'Backbone': 0,
     'R_Arm': 0,
     'L_Arm': 0,
+    'sem': 0,
 }
 right_num_sample = {
     'Root': 0,
@@ -330,18 +343,19 @@ right_num_sample = {
     'Backbone': 0,
     'R_Arm': 0,
     'L_Arm': 0,
+    'sem': 0,
 }
 
         
 ##### ---- Training ---- #####
 print('\n\n===> Pre-evaluation before training...')
-# best_fid, best_iter, best_div, best_top1, best_top2, best_top3, best_matching, writer, logger = \
-#     eval_bodypart.evaluation_transformer_batch(
-#         args.run_dir, val_loader, net, trans_encoder, logger, writer,
-#         0, best_fid=1000, best_iter=0, best_div=100,
-#         best_top1=0, best_top2=0, best_top3=0, best_matching=100,
-#         clip_model=clip_model, eval_wrapper=eval_wrapper)
-best_fid, best_iter, best_div, best_top1, best_top2, best_top3, best_matching = 1000, 0, 100, 0, 0, 0, 100
+best_fid, best_iter, best_div, best_top1, best_top2, best_top3, best_matching, writer, logger = \
+    eval_bodypart.evaluation_transformer_batch(
+        args.run_dir, val_loader, net, trans_encoder, logger, writer,
+        0, best_fid=1000, best_iter=0, best_div=100,
+        best_top1=0, best_top2=0, best_top3=0, best_matching=100,
+        clip_model=clip_model, eval_wrapper=eval_wrapper)
+# best_fid, best_iter, best_div, best_top1, best_top2, best_top3, best_matching = 1000, 0, 100, 0, 0, 0, 100
 time_consuming = {
     'dataloading_time': 0.,
     'text_to_clip_feat_time': 0.,
@@ -374,7 +388,13 @@ while nb_iter <= args.total_iter:
     L_Arm:      Tensor: (64, 51)
     token_len:  Tensor: (64)       Describing the length of tokenized motion, not include the End token, has only 1 dim.
     '''
-    caption, Root, R_Leg, L_Leg, Backbone, R_Arm, L_Arm, token_len = batch
+    if len(batch) == 10:
+        caption, Root, R_Leg, L_Leg, Backbone, R_Arm, L_Arm, token_len, sem_token, sem_token_len = batch
+        sem_token = sem_token.cuda()
+        sem_token_len = sem_token_len.cuda()
+    else:
+        caption, Root, R_Leg, L_Leg, Backbone, R_Arm, L_Arm, token_len = batch
+        sem_token, sem_token_len = None, None
 
     gt_parts = [Root, R_Leg, L_Leg, Backbone, R_Arm, L_Arm]
     for i in range(len(gt_parts)):
@@ -446,6 +466,18 @@ while nb_iter <= args.total_iter:
             a_indices = mask*input_p + (1-mask)*mask_token_value  # augmented indices
 
             input_parts.append(a_indices)  # collect augmented input indices
+        if sem_token is not None:
+            input_sem = sem_token
+            if args.pkeep == -1:
+                proba = np.random.rand(1)[0]
+                mask = torch.bernoulli(proba * torch.ones(input_sem.shape, device=input_sem.device))
+            else:
+                mask = torch.bernoulli(args.pkeep * torch.ones(input_sem.shape, device=input_sem.device))
+            mask = mask.round().to(dtype=torch.int64)
+            input_sem = mask*input_sem + (1-mask)*mask_token_value
+            
+            for i in range(len(input_parts)):
+                input_parts[i] = torch.cat([input_sem, input_parts[i]], dim=1)
 
 
     '''token augmentation time'''
@@ -472,7 +504,12 @@ while nb_iter <= args.total_iter:
         Thus, it is reasonable to let the transformer output 513-dim for prediction
           rather than 514-dim (including the padding flag).
     '''
-    parts_cls_pred = trans_encoder(input_parts, feat_clip_text)
+    if sem_token is not None:
+        parts_cls_pred = trans_encoder(input_parts, feat_clip_text, sem_token_len)
+        sem_cls_pred = parts_cls_pred[0][:, :semantic_len_max, :].contiguous()
+        parts_cls_pred = [parts_cls_pred[i][:, semantic_len_max:, :] for i in range(len(parts_cls_pred))]
+    else:
+        parts_cls_pred = trans_encoder(input_parts, feat_clip_text)
     for i in range(len(parts_cls_pred)):
         parts_cls_pred[i] = parts_cls_pred[i].contiguous()
 
@@ -526,12 +563,27 @@ while nb_iter <= args.total_iter:
             right_num_determine[name] += (cls_pred_index_determine == gt_parts[j]).sum().item()
             right_num_sample[name] += (cls_pred_index_sample == gt_parts[j]).sum().item()
 
+    if sem_token is not None:
+        sem_loss = loss_ce_batch(sem_cls_pred.permute(0,2,1), sem_token)
+        num_sem = (sem_loss != 0).sum(dim=1)
+        weight_sem = sem_token.shape[1] / num_sem
+        parts_loss_cls['sem'] = (sem_loss.mean(dim=1) * weight_sem).mean()
+        with torch.no_grad():
+            _, cls_pred_index_determine = torch.max(sem_cls_pred, dim=2)  # cls_pred_index (64, 51)
+            probs = torch.softmax(sem_cls_pred, dim=2)
+            dist = Categorical(probs)
+            cls_pred_index_sample = dist.sample()
+            right_num_determine['sem'] += (cls_pred_index_determine == sem_token).sum().item()
+            right_num_sample['sem'] += (cls_pred_index_sample == sem_token).sum().item()
+
 
 
     ## global loss
     loss_cls = 0.0
     for name in ['Root', 'R_Leg', 'L_Leg', 'Backbone', 'R_Arm', 'L_Arm']:
         loss_cls = loss_cls + parts_loss_cls[name]
+    if sem_token is not None:
+        loss_cls = loss_cls + parts_loss_cls['sem']
 
 
     '''loss compute time'''
@@ -550,6 +602,9 @@ while nb_iter <= args.total_iter:
 
     for name in ['Root', 'R_Leg', 'L_Leg', 'Backbone', 'R_Arm', 'L_Arm']:
         avg_loss_cls[name] = avg_loss_cls[name] + parts_loss_cls[name].item()
+        
+    if sem_token is not None:
+        avg_loss_cls['sem'] = avg_loss_cls['sem'] + parts_loss_cls['sem'].item()
 
     nb_sample_train = nb_sample_train + (m_tokens_len + 1).sum().item()
 
@@ -568,7 +623,17 @@ while nb_iter <= args.total_iter:
             avg_loss_cls[name] = 0.
             right_num_determine[name] = 0
             right_num_sample[name] = 0
-
+        if sem_token is not None:
+            avg_loss_cls['sem'] = avg_loss_cls['sem'] / args.print_iter
+            avg_acc_determine['sem'] = right_num_determine['sem'] * 100 / nb_sample_train
+            avg_acc_sample['sem'] = right_num_sample['sem'] * 100 / nb_sample_train
+            writer.add_scalar('./Loss/train_sem', avg_loss_cls['sem'], nb_iter)
+            writer.add_scalar('./ACC_determine/train_sem', avg_acc_determine['sem'], nb_iter)
+            writer.add_scalar('./ACC_sample/train_sem', avg_acc_sample['sem'], nb_iter)
+            msg += f" [sem] Loss. {avg_loss_cls['sem']:.4f}, ACC_deter. {avg_acc_determine['sem']:.3f}, ACC_sample. {avg_acc_sample['sem']:.3f}"
+            avg_loss_cls['sem'] = 0
+            right_num_determine['sem'] = 0
+            right_num_sample['sem'] = 0
 
         logger.info(msg)
         nb_sample_train = 0

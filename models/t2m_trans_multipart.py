@@ -100,72 +100,114 @@ class Text2Motion_Transformer(nn.Module):
 
     def sample_dual_head(self, clip_feature, if_categorial=False):
         B = clip_feature.shape[0]
-        xs = None 
-        # semantic_content_has_ended_flags[i] is True if self.num_vq was sampled in semantic phase for batch item i
-        semantic_content_has_ended_flags = torch.zeros(B, dtype=torch.bool, device=clip_feature.device)
+        device = clip_feature.device
+        # Max length of generated sequence for any part (semantic + reconstruction for that part pathway)
+        # self.block_size is the max sequence length for the attention mechanism, including condition token.
+        # So, max generated tokens = self.block_size - 1.
+        max_gen_len = self.block_size - 1
+        
+        if max_gen_len <= 0:
+            return torch.empty(B, self.num_parts, 0, dtype=torch.long, device=device)
 
-        for _ in range(self.block_size): 
-            current_len = xs.shape[1] if xs is not None else 0
-            
-            if current_len >= self.block_size:
+        # xs will store [semantic_tokens_repeated_for_all_parts | part_specific_reconstruction_tokens]
+        # Shape: (B, num_parts, current_generated_length)
+        xs = torch.empty(B, self.num_parts, 0, dtype=torch.long, device=device)
+
+        # Flags and trackers
+        # True if semantic part (first self.semantic_len slots) for batch item b is considered complete
+        # (either hit self.num_vq or filled self.semantic_len slots)
+        semantic_generation_complete_flags = torch.zeros(B, dtype=torch.bool, device=device)
+        # Stores the actual length of semantic content before padding or stop token for each batch item
+        actual_semantic_lengths = torch.full((B,), self.semantic_len, dtype=torch.long, device=device)
+        
+        # True if reconstruction for part p of batch item b has stopped
+        reconstruction_part_stopped_flags = torch.zeros(B, self.num_parts, dtype=torch.bool, device=device)
+        
+        # Token definitions
+        stop_token = self.num_vq
+        padding_token = self.num_vq + 1 # Used for padding after a sequence/part stops
+
+        for k_idx in range(max_gen_len): # k_idx is the index of the token we are currently generating for the sequence
+            # Overall stop condition
+            if torch.all(semantic_generation_complete_flags) and torch.all(reconstruction_part_stopped_flags):
                 break
 
-            current_input_for_transformer = xs if xs is not None else []
+            # Get logits for the current step k_idx
+            # self.forward expects input of shape (B, num_parts, k_idx)
+            # It returns a list of logits, where list_logits[p] is (B, k_idx, V)
+            # We use list_logits[p][:, -1, :] to predict token at index k_idx for part p's pathway
+            list_logits_all_parts = self.forward(xs, clip_feature, semantic_valid_lengths=actual_semantic_lengths)
             
-            logits = self.forward(current_input_for_transformer, clip_feature)
-            logits = logits[:, -1, :] 
-            probs = F.softmax(logits, dim=-1) # (B, V)
+            # Prepare a column of next tokens to be appended to xs
+            next_tokens_column = torch.full((B, self.num_parts), padding_token, dtype=torch.long, device=device)
 
-            next_step_tokens_for_batch = torch.zeros(B, dtype=torch.long, device=clip_feature.device)
-
-            if current_len < self.semantic_len: # Processing semantic part
-                candidate_tokens_this_step = None # Shape (B,)
+            # Phase 1: Semantic Token Generation (for k_idx < self.semantic_len)
+            if k_idx < self.semantic_len:
+                # Semantic predictions are taken from the 0-th part's logits pathway,
+                # as CrossCondTransMultipartHead ensures semantic logits are consistent there.
+                logits_for_semantic_token_at_k = list_logits_all_parts[0][:, -1, :] # (B, V)
+                probs_semantic = F.softmax(logits_for_semantic_token_at_k, dim=-1)
+                
+                sampled_semantic_tokens_for_slot_k = torch.zeros(B, dtype=torch.long, device=device)
                 if if_categorial:
-                    dist = Categorical(probs)
-                    candidate_tokens_this_step = dist.sample() 
+                    dist_sem = Categorical(probs_semantic)
+                    sampled_semantic_tokens_for_slot_k = dist_sem.sample()
                 else:
-                    _, topk_tokens = torch.topk(probs, k=1, dim=-1) 
-                    candidate_tokens_this_step = topk_tokens.squeeze(-1)
+                    _, topk_sem = torch.topk(probs_semantic, k=1, dim=-1)
+                    sampled_semantic_tokens_for_slot_k = topk_sem.squeeze(-1)
 
-                for i in range(B):
-                    if semantic_content_has_ended_flags[i]:
-                        # Semantic content for this item ended, force padding (self.num_vq)
-                        next_step_tokens_for_batch[i] = self.num_vq + 1
+                for b_idx in range(B):
+                    if not semantic_generation_complete_flags[b_idx]:
+                        token_val = sampled_semantic_tokens_for_slot_k[b_idx].item()
+                        # Store this semantic token in ALL parts for this batch item at current semantic slot k_idx
+                        next_tokens_column[b_idx, :] = token_val 
+                        actual_semantic_lengths[b_idx] = k_idx + 1 # Update true length of semantic content
+
+                        if token_val == stop_token or (k_idx == self.semantic_len - 1):
+                            semantic_generation_complete_flags[b_idx] = True
+                            # If stopped early, actual_semantic_lengths already updated.
+                            # If stopped exactly at self.semantic_len-1, flag is also set.
                     else:
-                        token_for_item_i = candidate_tokens_this_step[i]
-                        if token_for_item_i == self.num_vq: # First time self.num_vq in semantic part
-                            semantic_content_has_ended_flags[i] = True 
-                        next_step_tokens_for_batch[i] = token_for_item_i
-                
-                idx_sampled_token_tensor = next_step_tokens_for_batch.unsqueeze(-1) # (B,1)
-
-            else: # Processing reconstruction part (current_len >= self.semantic_len)
-                # self.num_vq is true stop. Follows sample_original_backup style for batch stop.
-                idx_sampled_token_tensor = None 
-                if if_categorial:
-                    dist = Categorical(probs)
-                    idx_val_batch = dist.sample() # (B,)
-                    # Simplified batch stop: if first item stops, all stop.
-                    # A robust batch solution would mask completed sequences.
-                    if idx_val_batch[0] == self.num_vq: 
-                        break 
-                    idx_sampled_token_tensor = idx_val_batch.unsqueeze(-1)
-                else:
-                    _, idx_val_topk_batch = torch.topk(probs, k=1, dim=-1) # (B,1)
-                    if idx_val_topk_batch[0,0] == self.num_vq: 
-                        break 
-                    idx_sampled_token_tensor = idx_val_topk_batch
+                        # Semantic generation already completed for this batch item (e.g. early stop)
+                        # Fill all parts with padding token for this semantic slot k_idx
+                        next_tokens_column[b_idx, :] = padding_token
             
-            if idx_sampled_token_tensor is None: # Should only happen if loop broke in recon phase
-                break
+            # Phase 2: Reconstruction Token Generation (for k_idx >= self.semantic_len)
+            # This executes if k_idx is a reconstruction slot.
+            # If k_idx < self.semantic_len, this block is skipped, and next_tokens_column is already filled by semantic logic.
+            if k_idx >= self.semantic_len:
+                for p_idx in range(self.num_parts): # Iterate over each reconstruction part pathway
+                    # Logits for part p_idx at reconstruction index (k_idx - self.semantic_len)
+                    logits_for_recon_token_part_p = list_logits_all_parts[p_idx][:, -1, :] # (B, V)
+                    probs_recon_p = F.softmax(logits_for_recon_token_part_p, dim=-1)
 
-            if xs is None:
-                xs = idx_sampled_token_tensor
-            else:
-                xs = torch.cat((xs, idx_sampled_token_tensor), dim=1)
+                    sampled_recon_tokens_for_part_p = torch.zeros(B, dtype=torch.long, device=device)
+                    if if_categorial:
+                        dist_rec_p = Categorical(probs_recon_p)
+                        sampled_recon_tokens_for_part_p = dist_rec_p.sample()
+                    else:
+                        _, topk_rec_p = torch.topk(probs_recon_p, k=1, dim=-1)
+                        sampled_recon_tokens_for_part_p = topk_rec_p.squeeze(-1)
+
+                    for b_idx in range(B):
+                        # Ensure semantic phase is complete for this batch item before starting its reconstruction
+                        if semantic_generation_complete_flags[b_idx]:
+                            if not reconstruction_part_stopped_flags[b_idx, p_idx]:
+                                token_val = sampled_recon_tokens_for_part_p[b_idx].item()
+                                next_tokens_column[b_idx, p_idx] = token_val
+                                if token_val == stop_token:
+                                    reconstruction_part_stopped_flags[b_idx, p_idx] = True
+                            # else: reconstruction for this part already stopped, next_tokens_column[b_idx, p_idx] remains padding_token
+                        else:
+                            # Semantic phase not yet complete for this batch item,
+                            # so its reconstruction slots should also be padding.
+                            # (This path should ideally not be hit if logic is correct, as semantic_generation_complete_flags
+                            #  should be true for all b_idx once k_idx >= self.semantic_len, unless semantic_len is 0)
+                            next_tokens_column[b_idx, p_idx] = padding_token 
                 
-        if xs is None: 
-            return torch.empty((B, 0), dtype=torch.long, device=clip_feature.device)
+            # Append the generated column of tokens to xs
+            xs = torch.cat((xs, next_tokens_column.unsqueeze(2)), dim=2)
+        
         return xs
     
     def sample_original_backup(self, clip_feature, if_categorial=False):
@@ -230,54 +272,91 @@ class Text2Motion_Transformer(nn.Module):
         padding_token_id = self.num_vq + 1 
 
         if self.dual_head_flag:
-            semantic_content_has_ended_flags = torch.zeros(B, dtype=torch.bool, device=device)
+            # Initialize flags and trackers for dual_head multi-part generation
+            semantic_generation_complete_flags = torch.zeros(B, dtype=torch.bool, device=device)
+            actual_semantic_lengths = torch.full((B,), self.semantic_len, dtype=torch.long, device=device)
+            # For dual_head_flag, num_parts corresponds to the number of reconstruction pathways/heads
+            # from CrossCondTransMultipartHead, which aligns with self.num_parts.
+            reconstruction_part_stopped_flags = torch.zeros(B, self.num_parts, dtype=torch.bool, device=device)
             
-            for _ in range(max_gen_len): # Loop to generate tokens up to max_gen_len
-                if torch.all(finished_sequences):
+            stop_token = self.num_vq
+            # padding_token_id is already defined outside the if/else
+
+            for k_idx in range(max_gen_len): # k_idx is the index of the token we are currently generating
+                # Overall stop condition for the batch
+                if torch.all(semantic_generation_complete_flags) and torch.all(reconstruction_part_stopped_flags):
                     break
                 
-                current_len = xs.shape[2]
+                # Get logits for the current step k_idx
+                # self.forward for dual_head=True returns a list of logits from CrossCondTransMultipartHead
+                # Each element list_logits_all_parts[p] is (B, current_xs_len + 1, V)
+                list_logits_all_parts = self.forward(xs, clip_feature, semantic_valid_lengths=actual_semantic_lengths)
                 
-                # Pass semantic_valid_lengths=None as xs is being generated token by token.
-                # Internal padding within xs (e.g. for early semantic stop) uses actual padding_token_id.
-                logits_all_steps = self.forward(xs, clip_feature, semantic_valid_lengths=None) 
-                logits_last_step = logits_all_steps[:, -1, :] # Shape: (B, V)
-                
-                probs = F.softmax(logits_last_step, dim=-1)
-                
-                next_tokens_sampled_from_dist = torch.zeros(B, dtype=torch.long, device=device)
-                if if_categorial:
-                    dist = Categorical(probs)
-                    next_tokens_sampled_from_dist = dist.sample()
-                else:
-                    _, next_tokens_sampled_from_dist = torch.topk(probs, k=1, dim=-1)
-                    next_tokens_sampled_from_dist = next_tokens_sampled_from_dist.squeeze(-1)
-                
-                # Prepare the actual tokens to append for this step, default to padding
-                actual_next_tokens = torch.full((B,), padding_token_id, dtype=torch.long, device=device)
+                # Prepare a column of next tokens to be appended to xs
+                next_tokens_column = torch.full((B, self.num_parts), padding_token_id, dtype=torch.long, device=device)
 
-                for i in range(B):
-                    if finished_sequences[i]:
-                        # This sequence already finished, actual_next_tokens[i] remains padding_token_id
-                        continue 
+                # Phase 1: Semantic Token Generation (for k_idx < self.semantic_len)
+                if k_idx < self.semantic_len:
+                    # Semantic predictions are taken from the 0-th part's logits pathway.
+                    # CrossCondTransMultipartHead's output list_logits_all_parts[0] gives this.
+                    logits_for_semantic_token_at_k = list_logits_all_parts[0][:, :, -1, :] # (B, V)
+                    probs_semantic = F.softmax(logits_for_semantic_token_at_k, dim=-1)
+                    
+                    sampled_semantic_tokens_for_slot_k = torch.zeros(B, dtype=torch.long, device=device)
+                    if if_categorial:
+                        dist_sem = Categorical(probs_semantic)
+                        sampled_semantic_tokens_for_slot_k = dist_sem.sample()
+                    else:
+                        _, topk_sem = torch.topk(probs_semantic, k=1, dim=-1)
+                        sampled_semantic_tokens_for_slot_k = topk_sem.squeeze(-1)
 
-                    token_i = next_tokens_sampled_from_dist[i]
+                    for b_idx in range(B):
+                        if not semantic_generation_complete_flags[b_idx]:
+                            token_val = sampled_semantic_tokens_for_slot_k[b_idx]
+                            # Store this semantic token in ALL parts for this batch item at current semantic slot k_idx
+                            next_tokens_column[b_idx, :] = token_val 
+                            actual_semantic_lengths[b_idx] = k_idx + 1 # Update true length of semantic content
 
-                    if current_len < self.semantic_len: # Semantic phase for sequence i
-                        if semantic_content_has_ended_flags[i]:
-                            # Semantic content ended early, pad this part of the semantic segment
-                            actual_next_tokens[i] = padding_token_id 
+                            if stop_token in token_val or (k_idx == self.semantic_len - 1):
+                                semantic_generation_complete_flags[b_idx] = True
                         else:
-                            # Semantic content is active
-                            if token_i == self.num_vq: # Semantic content just ended with a stop token
-                                semantic_content_has_ended_flags[i] = True
-                            actual_next_tokens[i] = token_i # Append the sampled token (could be num_vq)
-                    else: # Reconstruction phase for sequence i
-                        if token_i == self.num_vq: # Sequence truly finished
-                            finished_sequences[i] = True
-                        actual_next_tokens[i] = token_i # Append the sampled token (could be num_vq)
+                            # Semantic generation already completed for this batch item (e.g. early stop)
+                            # Fill all parts with padding token for this semantic slot k_idx
+                            next_tokens_column[b_idx, :] = padding_token_id
                 
-                xs = torch.cat((xs, actual_next_tokens.unsqueeze(1)), dim=1)
+                # Phase 2: Reconstruction Token Generation (for k_idx >= self.semantic_len)
+                if k_idx >= self.semantic_len:
+                    for p_idx in range(self.num_parts): # Iterate over each reconstruction part pathway
+                        # Logits for part p_idx at reconstruction index (k_idx - self.semantic_len)
+                        logits_for_recon_token_part_p = list_logits_all_parts[p_idx][:, -1, :] # (B, V)
+                        probs_recon_p = F.softmax(logits_for_recon_token_part_p, dim=-1)
+
+                        sampled_recon_tokens_for_part_p = torch.zeros(B, dtype=torch.long, device=device)
+                        if if_categorial:
+                            dist_rec_p = Categorical(probs_recon_p)
+                            sampled_recon_tokens_for_part_p = dist_rec_p.sample()
+                        else:
+                            _, topk_rec_p = torch.topk(probs_recon_p, k=1, dim=-1)
+                            sampled_recon_tokens_for_part_p = topk_rec_p.squeeze(-1)
+
+                        for b_idx in range(B):
+                            # Ensure semantic phase is complete for this batch item before starting its reconstruction
+                            if semantic_generation_complete_flags[b_idx]:
+                                if not reconstruction_part_stopped_flags[b_idx, p_idx]:
+                                    token_val = sampled_recon_tokens_for_part_p[b_idx].item()
+                                    next_tokens_column[b_idx, p_idx] = token_val
+                                    if token_val == stop_token:
+                                        reconstruction_part_stopped_flags[b_idx, p_idx] = True
+                                # else: reconstruction for this part already stopped or semantic not done,
+                                # next_tokens_column[b_idx, p_idx] remains padding_token_id by default.
+                            # else: (semantic_generation_complete_flags[b_idx] is False)
+                                # This part pathway remains padding if semantic isn't done. Covered by default fill.
+                
+                # Append the generated column of tokens to xs
+                # xs shape: (B, num_parts, current_k_idx)
+                # next_tokens_column shape: (B, num_parts)
+                # Unsqueeze to (B, num_parts, 1) for concatenation along dim 2.
+                xs = torch.cat((xs, next_tokens_column.unsqueeze(2)), dim=2)
 
         else: # Not dual_head_flag (logic similar to sample_original_backup but with robust batch completion)
             for _ in range(max_gen_len):
@@ -554,8 +633,8 @@ class CrossCondTransMultipartBase(nn.Module):
                 semantic_len = 50,
                 num_parts = 6): # num_parts specifies the number of reconstruction heads
         super().__init__()
-        self.tok_emb = nn.ModuleList([nn.Embedding(num_vq + 2, embed_dim) for _ in range(num_parts)])
-        self.sem_emb = nn.Embedding(num_vq + 2, embed_dim)
+        self.tok_emb = nn.ModuleList([nn.Embedding(num_vq + 3, embed_dim) for _ in range(num_parts)])
+        self.sem_emb = nn.Embedding(num_vq + 3, embed_dim)
         self.cond_emb = nn.Linear(clip_dim, embed_dim)
         self.pos_embedding = nn.Embedding(block_size, embed_dim)
         self.drop = nn.Dropout(drop_out_rate)
@@ -598,16 +677,16 @@ class CrossCondTransMultipartBase(nn.Module):
             # Mask for blocks is just for the condition embedding (i.e., False, do not mask)
             mask_for_blocks = torch.zeros(condition_embedding.shape[0], 1, dtype=torch.bool, device=condition_embedding.device)
         else:
-            b, t_idx = idx.size()
+            b, part_num, t_idx = idx.size()
             assert t_idx <= self.block_size, f"Cannot forward, idx sequence length {t_idx} exceeds model block size {self.block_size}."
 
             # Prepare token embeddings from idx based on whether it's semantic, reconstruction, or both
             if t_idx <= self.semantic_len : # Only semantic tokens (or shorter than self.semantic_len)
-                token_embeddings_unconditioned = self.sem_emb(idx)
+                token_embeddings_unconditioned = self.sem_emb(idx[:,0,:])
             else: # Both semantic and reconstruction tokens
-                token_sem_embeddings = self.sem_emb(idx[..., :self.semantic_len])
+                token_sem_embeddings = self.sem_emb(idx[:,0,:self.semantic_len])
                 token_recon_embeddings = [
-                    self.tok_emb[i](idx[..., self.semantic_len:t_idx]) for i in range(self.num_recon_heads)
+                    self.tok_emb[i](idx[:,i,self.semantic_len:t_idx]) for i in range(self.num_recon_heads)
                 ]
                 token_recon_embeddings = torch.stack(token_recon_embeddings, dim=0).sum(dim=0)
                 token_embeddings_unconditioned = torch.cat([token_sem_embeddings, token_recon_embeddings], dim=1)
@@ -783,11 +862,12 @@ class CrossCondTransMultipartHead(nn.Module):
         self.head_semantic = nn.Linear(embed_dim, num_vq + 1, bias=False)
 
         # Reconstruction heads
-        self.ln_f_reconstruction_list = nn.ModuleList()
-        self.heads_reconstruction_list = nn.ModuleList()
-        for _ in range(self.num_recon_heads):
-            self.ln_f_reconstruction_list.append(nn.LayerNorm(embed_dim))
-            self.heads_reconstruction_list.append(nn.Linear(embed_dim, num_vq + 1, bias=False))
+        self.ln_f_reconstruction_list = nn.ModuleList([
+            nn.LayerNorm(embed_dim) for _ in range(num_parts)
+        ])
+        self.heads_reconstruction_list = nn.ModuleList([
+            nn.Linear(embed_dim, num_vq + 1, bias=False) for _ in range(num_parts)
+        ])
         
         # # Calculate theoretical maximum lengths for each reconstruction segment
         # self.reconstruction_segment_lengths = []
@@ -832,63 +912,29 @@ class CrossCondTransMultipartHead(nn.Module):
 
         B, T_full_input_len, C_dim = x_after_blocks.shape
         
-        # --- Semantic Part ---
-        # Features for semantic part are in x_after_blocks[:, 0 : self.semantic_len, :]
-        # Determine actual end index for semantic features based on T_full_input_len
-        semantic_features_start_idx_in_x = 0
-        semantic_features_end_idx_in_x_defined = self.semantic_len
-        actual_semantic_features_end_idx = min(semantic_features_end_idx_in_x_defined, T_full_input_len)
 
-        logits_semantic = torch.empty(B, 0, self.head_semantic.out_features, device=x_after_blocks.device)
-        
-        actual_semantic_len_processed = actual_semantic_features_end_idx - semantic_features_start_idx_in_x
-        if actual_semantic_len_processed > 0:
-            semantic_features = x_after_blocks[:, semantic_features_start_idx_in_x:actual_semantic_features_end_idx, :]
-            normed_sem_features = self.ln_f_semantic(semantic_features)
-            logits_semantic = self.head_semantic(normed_sem_features)
+        semantic_features = x_after_blocks[:, :self.semantic_len, :]
+        normed_sem_features = self.ln_f_semantic(semantic_features)
+        logits_semantic = self.head_semantic(normed_sem_features)
 
-        # --- Reconstruction Parts ---
-        all_recon_logits_parts = []
-        # current_recon_offset_in_x is the starting index in x_after_blocks for the current recon segment's features
-        current_recon_offset_in_x = self.semantic_len 
-
-        for i in range(self.num_recon_heads):
-            ln_layer = self.ln_f_reconstruction_list[i]
-            head_layer = self.heads_reconstruction_list[i]
-            # Max defined length for this reconstruction segment
-            # defined_length_of_this_recon_segment = self.reconstruction_segment_lengths[i]
-
-            # Determine actual slice for this segment's features from x_after_blocks
-            # segment_features_start_in_x = current_recon_offset_in_x
-            # segment_features_end_in_x_defined = current_recon_offset_in_x + defined_length_of_this_recon_segment
-            # actual_segment_features_end_in_x = min(segment_features_end_in_x_defined, T_full_input_len)
-            
-            current_part_logits = torch.empty(B, 0, head_layer.out_features, device=x_after_blocks.device)
-            # actual_len_of_this_segment_processed = actual_segment_features_end_in_x - segment_features_start_in_x
-
-            # if actual_len_of_this_segment_processed > 0:
-            recon_segment_features = x_after_blocks[:, self.semantic_len:, :]
-            normed_recon_features = ln_layer(recon_segment_features)
-            current_part_logits = head_layer(normed_recon_features)
-            
-            all_recon_logits_parts.append(current_part_logits)
-            # Advance offset by the theoretical/defined length for the next segment
-            # current_recon_offset_in_x += defined_length_of_this_recon_segment
-            
-            # Optimization: if we have processed all available input features from x_after_blocks
-            # if actual_segment_features_end_in_x >= T_full_input_len and i < self.num_recon_heads -1:
-            #      # Add empty logits for any remaining theoretical recon heads if their defined length is > 0
-            #      # to maintain the structure for torch.cat, ensuring subsequent parts are correctly empty.
-            #     for j in range(i + 1, self.num_recon_heads):
-            #         empty_head_layer = self.heads_reconstruction_list[j]
-            #         all_recon_logits_parts.append(torch.empty(B, 0, empty_head_layer.out_features, device=x_after_blocks.device))
-            #     break
-
-
-        # Combine all logits parts
-        # The logits should correspond to the positions *after* the condition token.
-        final_logits_list = [logits_semantic] + all_recon_logits_parts
-        logits_result = torch.cat(final_logits_list, dim=1)
-        
-        return logits_result
+        recon_features = x_after_blocks[:, self.semantic_len:, :]
+        if recon_features.shape[1] > 0:
+            all_recon_logits_parts = []
+            for i in range(self.num_recon_heads):
+                ln_layer = self.ln_f_reconstruction_list[i]
+                head_layer = self.heads_reconstruction_list[i]
+                recon_features_part = recon_features
+                normed_recon_features = ln_layer(recon_features_part)
+                current_part_logits = head_layer(normed_recon_features)
+                all_recon_logits_parts.append(current_part_logits)
+            all_recon_logits_parts = torch.stack(all_recon_logits_parts).permute(1, 0, 2, 3) 
+            logits_semantic = logits_semantic.unsqueeze(1).expand(-1, self.num_recon_heads, -1, -1)
+            logits_result = torch.cat([logits_semantic, all_recon_logits_parts], dim=2)
+            output = [logits_result[:, i, :, :] for i in range(self.num_recon_heads)]
+        else:
+            # all_recon_logits_parts = []
+            logits_semantic = logits_semantic.unsqueeze(1).expand(-1, self.num_recon_heads, -1, -1)
+            output = [logits_semantic]
+        # (num_parts, B, T, num_vq + 1) -> (B, num_parts, T, num_vq + 1)
+        return output
 

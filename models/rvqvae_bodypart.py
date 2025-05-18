@@ -277,10 +277,11 @@ class VQVAE_bodypart(nn.Module):
             encoded_features_list = self.encoder(preprocessed_parts_for_encoder)
             if self.dual_vision == 1:
                 dual_encoder_input = [self.preprocess(p) for p in encoded_features_list]
-                if self.args.down_t == 2 and motion_mask is not None:
-                    motion_mask = motion_mask[:, ::4]
-                elif self.args.down_t == 1 and motion_mask is not None:
-                    motion_mask = motion_mask[:, ::2]
+                if self.args.down_vqvae == 1:
+                    if self.args.down_t == 2 and motion_mask is not None:
+                        motion_mask = motion_mask[:, ::4]
+                    elif self.args.down_t == 1 and motion_mask is not None:
+                        motion_mask = motion_mask[:, ::2]
                 cls_token, loss_sem, commit_perplexity = self.dual_encoder(dual_encoder_input, [text_feature, text_id], text_mask, motion_mask)
                 # contrastive_loss, mlm_loss = loss_sem
                 loss_commit_sem, perplexity_sem = commit_perplexity

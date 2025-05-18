@@ -16,7 +16,7 @@ from transformers import CLIPModel, CLIPTokenizer
 import re
 
 class VQMotionDatasetBodyPart(data.Dataset):
-    def __init__(self, dataset_name, window_size=64, unit_length=4, print_warning=False, strategy='basic', with_clip=False, get_vqvae=False):
+    def __init__(self, dataset_name, window_size=64, unit_length=4, print_warning=False, strategy='medium', with_clip=False, get_vqvae=False):
         self.window_size = window_size
         self.unit_length = unit_length
         self.dataset_name = dataset_name

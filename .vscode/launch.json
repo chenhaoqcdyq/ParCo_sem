@@ -253,11 +253,11 @@
       // "program": "train_ParCo_rvq_sem_global.py",
       "console": "integratedTerminal",
       "args": [
-        "--vqvae-train-dir=output/01003-t2m-v26_down0/VQVAE-v26_down0-t2m-default",
+        "--vqvae-train-dir=output/01009-t2m-v26_dual/VQVAE-v26_dual-t2m-default",
         "--select-vqvae-ckpt=last",
         "--exp-name=ParCo_multipart",
         "--pkeep=0.4",
-        "--batch-size=32",
+        "--batch-size=2",
         "--trans-cfg=default",
         "--fuse-ver=V1_3",
         "--alpha=1.0",
@@ -265,7 +265,7 @@
         "--embed-dim-gpt=1024",
         "--nb-code=512",
         "--n-head-gpt=16",
-        "--block-size=198",
+        "--block-size=249",
         "--ff-rate=4",
         "--drop-out-rate=0.1",
         "--total-iter=300000",
@@ -279,7 +279,7 @@
         "--dilation-growth-rate=3",
         "--vq-act=relu",
         "--use-existing-vq-data",
-        "--existing-vq-data-dir=output/01003-t2m-v26_down0/00006-Trans-ParCo_multipart-default/quantized_dataset_t2m"
+        "--existing-vq-data-dir=output/01009-t2m-v26_dual/00002-Trans-ParCo_multipart-default/quantized_dataset_t2m"
       ],
       "justMyCode": false,
       "env": {
