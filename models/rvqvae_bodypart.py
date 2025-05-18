@@ -156,7 +156,7 @@ class VQVAE_bodypart(nn.Module):
         return x
 
 
-    def encode(self, parts, motion_mask = None):
+    def encode(self, parts, caption = None):
         """
         This is used in training transformer (train_t2m_trans.py and the parts ver.),
           for getting the embedding(also named tokens, discrete repre) of motions.
@@ -172,30 +172,75 @@ class VQVAE_bodypart(nn.Module):
         assert isinstance(parts, list)
         assert len(parts) == len(self.parts_name)
 
-        tokenized_parts = []
-        for i, name in enumerate(self.parts_name):  # parts_name: ['Root', 'R_Leg', 'L_Leg', 'Backbone', 'R_Arm', 'L_Arm']
+        # 1. Preprocess inputs for the MultiPartEncoder
+        # Each part tensor in 'parts' is (B, T, C_raw)
+        # self.preprocess permutes it to (B, C_raw, T)
+        preprocessed_parts_for_encoder = [self.preprocess(p) for p in parts]
+        code_idx_list, sem_code_idx_list = [], []
+        if self.args.lgvq>=1 and caption is not None and len(caption) == 4:
+            text_feature, text_id, text_mask, motion_mask = caption
+        else:
+            text_feature, text_id, text_mask, motion_mask = None, None, None, None
+        # 2. Encode all parts using the MultiPartEncoder
+        # Output is a list of tensors, each (B, C_encoded, T_encoded)
+        if self.interaction:
+            encoded_features_list = self.encoder(preprocessed_parts_for_encoder)
+            if self.dual_vision == 1:
+                dual_encoder_input = [self.preprocess(p) for p in encoded_features_list]
+                if self.args.down_t == 2 and motion_mask is not None:
+                    motion_mask = motion_mask[:, ::4]
+                elif self.args.down_t == 1 and motion_mask is not None:
+                    motion_mask = motion_mask[:, ::2]
+                sem_code_idx = self.dual_encoder.encode(dual_encoder_input, [text_feature, text_id], text_mask, motion_mask)
+                sem_code_idx_list.append(sem_code_idx)
 
-            x = parts[i]
-            N, T, _ = x.shape
-            # Preprocess
-            x_in = self.preprocess(x)  # (B, nframes, in_dim) ==> (B, in_dim, nframes)
-
-            # Encode
-            encoder = getattr(self, f'enc_{name}')
-            x_encoder = encoder(x_in)  # (B, out_dim, nframes)
-            x_encoder = self.postprocess(x_encoder)  # (B, nframes, out_dim)
-            x_encoder = x_encoder.contiguous().view(-1, x_encoder.shape[-1])  # (B*nframes, out_dim)
-
+        # 3. Iterate for Quantization and Decoding for each part
+        for i, name in enumerate(self.parts_name):
+            N, T, _ = parts[i].shape
+            if self.interaction:
+                current_part_encoded = encoded_features_list[i] # This is (B, C_encoded, T_encoded)
+            else:
+                encoder = getattr(self, f'enc_{name}')
+                current_part_encoded = encoder(preprocessed_parts_for_encoder[i])
+            current_part_encoded = current_part_encoded.contiguous().view(-1, current_part_encoded.shape[-1])
             # Quantization
             quantizer = getattr(self, f'quantizer_{name}')
-            code_idx = quantizer.quantize(x_encoder)  # (B*nframes, out_dim) --> (B*nframes)
+            # Quantizer expects (B, C_encoded, T_encoded)
+            code_idx = quantizer.quantize(current_part_encoded.permute(1, 0))
             code_idx = code_idx.view(N, -1)  # (B, nframes)
             if motion_mask is not None:
                 code_idx[~motion_mask.bool()] = quantizer.nb_code
+            code_idx_list.append(code_idx)
 
-            tokenized_parts.append(code_idx)
+        # Return the list of x_out, loss, perplexity
+        return code_idx_list, sem_code_idx_list
+        # assert isinstance(parts, list)
+        # assert len(parts) == len(self.parts_name)
 
-        return tokenized_parts
+        # tokenized_parts = []
+        # for i, name in enumerate(self.parts_name):  # parts_name: ['Root', 'R_Leg', 'L_Leg', 'Backbone', 'R_Arm', 'L_Arm']
+
+        #     x = parts[i]
+        #     N, T, _ = x.shape
+        #     # Preprocess
+        #     x_in = self.preprocess(x)  # (B, nframes, in_dim) ==> (B, in_dim, nframes)
+
+        #     # Encode
+        #     encoder = getattr(self, f'enc_{name}')
+        #     x_encoder = encoder(x_in)  # (B, out_dim, nframes)
+        #     x_encoder = self.postprocess(x_encoder)  # (B, nframes, out_dim)
+        #     x_encoder = x_encoder.contiguous().view(-1, x_encoder.shape[-1])  # (B*nframes, out_dim)
+
+        #     # Quantization
+        #     quantizer = getattr(self, f'quantizer_{name}')
+        #     code_idx = quantizer.quantize(x_encoder)  # (B*nframes, out_dim) --> (B*nframes)
+        #     code_idx = code_idx.view(N, -1)  # (B, nframes)
+        #     if motion_mask is not None:
+        #         code_idx[~motion_mask.bool()] = quantizer.nb_code
+
+        #     tokenized_parts.append(code_idx)
+
+        # return tokenized_parts
 
 
     def forward(self, parts, caption=None):
@@ -3664,6 +3709,12 @@ class HumanVQVAETransformerV26(nn.Module):
     
     def decode(self, code_index):
         return self.vqvae.forward_decoder(code_index)
+    
+    def forward_decoder(self, code_index):
+        return self.vqvae.forward_decoder(code_index)
+    
+    def forward_decoder_batch(self, code_index):
+        return self.vqvae.forward_decoder_batch(code_index)
     
     # def text_motion_topk(self, motion, text, motion_mask=None, topk=5, text_mask=None):
     #     return self.vqvae.text_motion_topk(motion, text, motion_mask, topk, text_mask)

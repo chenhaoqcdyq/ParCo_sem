@@ -10,6 +10,7 @@ from torch.utils.tensorboard import SummaryWriter
 from torch.distributions import Categorical
 
 import clip
+from tqdm import tqdm
 
 from options.get_eval_option import get_opt
 import options.option_transformer_bodypart as option_trans
@@ -23,6 +24,7 @@ from utils.misc import EasyDict
 import models.vqvae_bodypart as vqvae_bodypart
 from models.evaluator_wrapper import EvaluatorModelWrapper
 import models.t2m_trans_bodypart as trans_bodypart
+import models.t2m_trans_multipart as trans_multipart
 
 from dataset import dataset_TM_train_bodypart
 from dataset import dataset_TM_eval_bodypart
@@ -130,17 +132,17 @@ with open(args.args_save_dir, 'wt') as f:
 
 # [Bodypart VQVAE]: construction, weight loading
 print('\n\n===> Constructing VQVAE for quantize...')
-net = getattr(vqvae, f'HumanVQVAETransformerV{args.vision}')(args,  # use args to define different parameters in different quantizers
-        parts_code_nb=args.vqvae_arch_cfg['parts_code_nb'],
-        parts_code_dim=args.vqvae_arch_cfg['parts_code_dim'],
-        parts_output_dim=args.vqvae_arch_cfg['parts_output_dim'],
-        parts_hidden_dim=args.vqvae_arch_cfg['parts_hidden_dim'],
-        down_t=args.down_t,
-        stride_t=args.stride_t,
-        depth=args.depth,
-        dilation_growth_rate=args.dilation_growth_rate,
-        activation=args.vq_act,
-        norm=args.vq_norm
+net = getattr(vqvae, f'HumanVQVAETransformerV{vqvae_train_args.vision}')(vqvae_train_args,  # use args to define different parameters in different quantizers
+        parts_code_nb=vqvae_train_args.vqvae_arch_cfg['parts_code_nb'],
+        parts_code_dim=vqvae_train_args.vqvae_arch_cfg['parts_code_dim'],
+        parts_output_dim=vqvae_train_args.vqvae_arch_cfg['parts_output_dim'],
+        parts_hidden_dim=vqvae_train_args.vqvae_arch_cfg['parts_hidden_dim'],
+        down_t=vqvae_train_args.down_t,
+        stride_t=vqvae_train_args.stride_t,
+        depth=vqvae_train_args.depth,
+        dilation_growth_rate=vqvae_train_args.dilation_growth_rate,
+        activation=vqvae_train_args.vq_act,
+        norm=vqvae_train_args.vq_norm
     )    
 print('===> Loading VQVAE checkpoint from {}...'.format(args.vqvae_ckpt_path))
 ckpt = torch.load(args.vqvae_ckpt_path, map_location='cpu')
@@ -151,16 +153,19 @@ net.cuda()
 
 ##### ---- Prepare tokenized motion dataset ---- #####
 print('\n\n===> Preparing the quantized motion for training:')
-
+if vqvae_train_args.down_vqvae == 1:
+    unit_length = 2**vqvae_train_args.down_t
+else:
+    unit_length = 1
 if not args.use_existing_vq_data:
     # [token loader]
     print('===> Constructing dataset for tokenize...')
     train_loader_token = dataset_tokenize_bodypart.DATALoader(
-        args.dataname, 1, unit_length=2**args.down_t)
+        args.dataname, 1, unit_length=unit_length)
 
     # Get code (quantized motion)
     print('===> Getting the code...')
-    for batch in train_loader_token:
+    for batch in tqdm(train_loader_token, desc='Tokenizing...'):
         '''
         Batch_size == 1
         Root:     (B, nframes, 7)     >==[quantized]==>  (B, nframes)
@@ -181,7 +186,7 @@ if not args.use_existing_vq_data:
         tokenized_parts = net.encode(parts)
 
         for i, part_name in enumerate(['Root', 'R_Leg', 'L_Leg', 'Backbone', 'R_Arm', 'L_Arm']):
-            tok_p = tokenized_parts[i]  # (B, nframes)
+            tok_p = tokenized_parts[0][i]  # (B, nframes)
             tok_p = tok_p.cpu().numpy()
             # use name[0] because the batch size is 1
             np.save(pjoin(args.vq_dir, name[0] + '_' + part_name + '.npy'), tok_p)
@@ -206,14 +211,14 @@ val_loader = dataset_TM_eval_bodypart.DATALoader(
 print('\n\n===> Constructing dataset for training transformer...')
 # train loader
 train_loader = dataset_TM_train_bodypart.DATALoader(
-    dataset_name=args.dataname, vq_dir=args.vq_dir, unit_length=2**args.down_t, codebook_size=args.nb_code,
+    dataset_name=args.dataname, vq_dir=args.vq_dir, unit_length=unit_length, codebook_size=args.nb_code,
     batch_size=args.batch_size,)
 train_loader_iter = dataset_TM_train_bodypart.cycle(train_loader)
 
 
 # Prepare evaluation wrapper
 print('\n\n===> Loading EvaluatorModelWrapper...')
-dataset_opt_path = 'checkpoints/kit/Comp_v6_KLD005/opt.txt' if args.dataname == 'kit' else 'checkpoints/t2m/Comp_v6_KLD005/opt.txt'
+dataset_opt_path = 'checkpoints/kit/Comp_v6_KLD005/opt.txt' if args.dataname == 'kit' else 'checkpoints/t2m/Comp_v6_KLD01/opt.txt'
 wrapper_opt = get_opt(dataset_opt_path, torch.device('cuda'))
 eval_wrapper = EvaluatorModelWrapper(wrapper_opt)
 
@@ -230,27 +235,40 @@ for p in clip_model.parameters():
 # [Transformer]: construction, weight loading (if resume)
 print('\n\n===> Constructing our bodypart transformer...')
 # todo: implement our transformer
-trans_encoder = trans_bodypart.TransformerFuseHiddenDim(
+# trans_encoder = trans_bodypart.TransformerFuseHiddenDim(
 
+#     clip_dim=args.clip_dim,
+#     block_size=args.block_size,
+#     num_layers=args.num_layers,
+#     n_head=args.n_head_gpt,
+#     drop_out_rate=args.drop_out_rate,
+#     fc_rate=args.ff_rate,
+
+#     # FusionModule
+#     use_fuse=args.use_fuse,
+#     fuse_ver=args.fuse_ver,
+#     alpha=args.alpha,
+
+#     parts_code_nb=args.trans_arch_cfg['parts_code_nb'],
+#     parts_embed_dim=args.trans_arch_cfg['parts_embed_dim'],
+#     num_mlp_layers=args.trans_arch_cfg['num_mlp_layers'],
+#     fusev2_sub_mlp_out_features=args.trans_arch_cfg['fusev2_sub_mlp_out_features'],
+#     fusev2_sub_mlp_num_layers=args.trans_arch_cfg['fusev2_sub_mlp_num_layers'],
+#     fusev2_head_mlp_num_layers=args.trans_arch_cfg['fusev2_head_mlp_num_layers'],
+
+# )
+trans_encoder = trans_multipart.Text2Motion_Transformer(
+    num_vq=args.nb_code,
+    embed_dim=args.embed_dim_gpt,
     clip_dim=args.clip_dim,
     block_size=args.block_size,
     num_layers=args.num_layers,
     n_head=args.n_head_gpt,
     drop_out_rate=args.drop_out_rate,
     fc_rate=args.ff_rate,
-
-    # FusionModule
-    use_fuse=args.use_fuse,
-    fuse_ver=args.fuse_ver,
-    alpha=args.alpha,
-
-    parts_code_nb=args.trans_arch_cfg['parts_code_nb'],
-    parts_embed_dim=args.trans_arch_cfg['parts_embed_dim'],
-    num_mlp_layers=args.trans_arch_cfg['num_mlp_layers'],
-    fusev2_sub_mlp_out_features=args.trans_arch_cfg['fusev2_sub_mlp_out_features'],
-    fusev2_sub_mlp_num_layers=args.trans_arch_cfg['fusev2_sub_mlp_num_layers'],
-    fusev2_head_mlp_num_layers=args.trans_arch_cfg['fusev2_head_mlp_num_layers'],
-
+    dual_head_flag=False,
+    semantic_len=50,
+    num_parts=6,
 )
 
 if args.resume_trans is not None:
@@ -317,13 +335,13 @@ right_num_sample = {
         
 ##### ---- Training ---- #####
 print('\n\n===> Pre-evaluation before training...')
-best_fid, best_iter, best_div, best_top1, best_top2, best_top3, best_matching, writer, logger = \
-    eval_bodypart.evaluation_transformer_batch(
-        args.run_dir, val_loader, net, trans_encoder, logger, writer,
-        0, best_fid=1000, best_iter=0, best_div=100,
-        best_top1=0, best_top2=0, best_top3=0, best_matching=100,
-        clip_model=clip_model, eval_wrapper=eval_wrapper)
-
+# best_fid, best_iter, best_div, best_top1, best_top2, best_top3, best_matching, writer, logger = \
+#     eval_bodypart.evaluation_transformer_batch(
+#         args.run_dir, val_loader, net, trans_encoder, logger, writer,
+#         0, best_fid=1000, best_iter=0, best_div=100,
+#         best_top1=0, best_top2=0, best_top3=0, best_matching=100,
+#         clip_model=clip_model, eval_wrapper=eval_wrapper)
+best_fid, best_iter, best_div, best_top1, best_top2, best_top3, best_matching = 1000, 0, 100, 0, 0, 0, 100
 time_consuming = {
     'dataloading_time': 0.,
     'text_to_clip_feat_time': 0.,

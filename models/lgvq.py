@@ -2993,6 +2993,55 @@ class Dualsem_encoderv4(nn.Module):
         
         return cls_token, [contrastive_loss, mlm_loss], [loss_commit, perplexity]
     
+    def encode(self, parts_feature, text=None, text_mask=None, motion_mask=None):
+        # 部件特征预处理 bs,6,seq,d
+        B, T = parts_feature[0].shape[0], parts_feature[0].shape[1]
+        
+        # 时空位置编码注入
+        part_embeds = []
+        for i, feat in enumerate(parts_feature):
+            part_embeds.append(feat + self.part_position.weight[i][None, None, :])
+            
+        # 构建时空特征立方体
+        spatial_cube = torch.stack(part_embeds, dim=2)
+        # 数据增强
+        if self.training:
+            spatial_cube = self.motion_aug(spatial_cube)
+            
+        # 添加全局token
+        global_part_tokens = self.global_part_token.expand(B*T, -1, -1)
+        fused_feat = torch.cat([
+            global_part_tokens,
+            rearrange(spatial_cube, 'b t p d -> (b t) p d', b=B)
+        ], dim=1)
+        
+        # 空间特征处理
+        spatial_feat = rearrange(fused_feat, '(b t) p d-> (b t) p d', b=B, p=7)
+        spatial_feat = self.spatial_transformer(spatial_feat)
+        # 时间特征处理
+        time_feat = rearrange(spatial_feat, '(b t) p d-> (b p) t d', b=B, p=7)
+        if motion_mask is not None:
+            motion_mask = motion_mask.to(time_feat.device).bool()
+            time_key_padding_mask = motion_mask.repeat_interleave(7, dim=0)
+            
+            # 在每一层Transformer后应用时间降采样
+            for i, layer in enumerate(self.time_transformer.layers):
+                time_feat = self.time_downsamplers[i](time_feat)
+                if self.ifdown_sample:
+                    time_key_padding_mask = time_key_padding_mask[:, ::2]  # 更新mask
+                time_feat = layer(time_feat, src_key_padding_mask=~time_key_padding_mask)
+        else:
+            # 在每一层Transformer后应用时间降采样
+            for i, layer in enumerate(self.time_transformer.layers):
+                time_feat = self.time_downsamplers[i](time_feat)
+                time_feat = layer(time_feat)
+            
+        # 特征重组
+        feature = rearrange(time_feat, '(b p) t d -> b t p d', b=B, p=7)
+        
+        code_idx = self.sem_quantizer.quantize(feature[:, :, 0, :])
+        return code_idx
+    
     def text_motion_topk(self, motion, text, motion_mask=None, topk=5, text_mask=None):
         """
         计算动作和文本之间的Top-K匹配

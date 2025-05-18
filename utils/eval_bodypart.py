@@ -275,7 +275,8 @@ def evaluation_transformer_batch(out_dir, val_loader, net, trans, logger, writer
             batch_parts_index_motion = trans.sample_batch(feat_clip_text, False)  # List: [(B, seq_len), ..., (B, seq_len)]
 
             max_motion_seq_len = batch_parts_index_motion[0].shape[1]
-
+            if isinstance(batch_parts_index_motion, torch.Tensor):
+                batch_parts_index_motion = [batch_parts_index_motion[:,i,:] for i in range(batch_parts_index_motion.shape[1])]
             for k in range(bs):
 
                 min_motion_seq_len = max_motion_seq_len
@@ -286,7 +287,7 @@ def evaluation_transformer_batch(out_dir, val_loader, net, trans, logger, writer
                     part_index = part_index[k:k+1]  # (1, seq_len)
 
                     # find the earliest end token position
-                    idx = torch.nonzero(part_index == trans.parts_code_nb[name])
+                    idx = torch.nonzero(part_index == trans.num_vq)
 
                     # # Debug
                     # print('part_index:', part_index)

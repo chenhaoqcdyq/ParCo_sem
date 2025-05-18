@@ -39,6 +39,45 @@ vqvae_bodypart_cfg_cnn = {
 
 }
 
+vqvae_bodypart_cfg_cnn_256 = {
+    'default': dict(
+        parts_code_nb={  # number of codes
+            'Root': 512,
+            'R_Leg': 512,
+            'L_Leg': 512,
+            'Backbone': 512,
+            'R_Arm': 512,
+            'L_Arm': 512,
+        },
+        parts_code_dim={  # Remember code_dim should be same to output_dim
+            'Root': 256,
+            'R_Leg': 256,
+            'L_Leg': 256,
+            'Backbone': 256,
+            'R_Arm': 256,
+            'L_Arm': 256,
+        },
+        parts_output_dim={  # dimension of encoder's output
+            'Root': 256,
+            'R_Leg': 256,
+            'L_Leg': 256,
+            'Backbone': 256,
+            'R_Arm': 256,
+            'L_Arm': 256,
+        },
+        parts_hidden_dim={  # hidden dimension of conv1d in encoder/decoder
+            'Root': 256,
+            'R_Leg': 256,
+            'L_Leg': 256,
+            'Backbone': 256,
+            'R_Arm': 256,
+            'L_Arm': 256,
+        }
+
+    ),
+
+}
+
 vqvae_bodypart_cfg = {
     'default': dict(
         parts_code_nb={  # number of codes
@@ -159,7 +198,7 @@ def get_args_parser(args=None):
     parser.add_argument('--num-layers', type=int, default=2)
     parser.add_argument('--numdec-layers', type=int, default=2)
     parser.add_argument('--bodyconfig', type=bool, default=False)
-    parser.add_argument('--causal', type=bool, default=False, help='causal squence')
+    parser.add_argument('--causal', type=int, default=0, help='causal squence')
     parser.add_argument('--position', type=int, default=0, help='0:without pos 1:learnable 2:cos sin')
     parser.add_argument('--d_model', type=int, default=256, help='d_model')
     parser.add_argument('--with_attn', type=bool, default=False, help='with_attn')
@@ -197,6 +236,7 @@ def get_args_parser(args=None):
     parser.add_argument('--freeze_encdec', type=int, default=0, help='freeze_encdec')
     parser.add_argument('--interaction', type=int, default=0, help='interaction')
     parser.add_argument('--down_vqvae', type=int, default=1, help='down_vqvae')
+    parser.add_argument('--body_cfg', type=int, default=0, help='body_dim')
     
     if args is None:
         return parser.parse_args()
