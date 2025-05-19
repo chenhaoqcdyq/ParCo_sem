@@ -561,7 +561,16 @@ while nb_iter <= args.total_iter:
             _, cls_pred_index_determine = torch.max(parts_cls_pred[j], dim=2)  # cls_pred_index (64, 51)
 
             # predict the class according to their probability distribution
-            probs = torch.softmax(parts_cls_pred[j], dim=2)
+            # probs = torch.softmax(parts_cls_pred[j], dim=2)
+            # predict the class according to their probability distribution
+            # 添加数值稳定化处理
+            logits = parts_cls_pred[j]
+            logits = logits - logits.max(dim=-1, keepdim=True)[0]  # 减去最大值以提高数值稳定性
+            probs = torch.softmax(logits, dim=2)
+            
+            # 添加安全检查，将NaN值替换为均匀分布
+            if torch.isnan(probs).any():
+                probs = torch.ones_like(probs) / probs.size(-1)
             dist = Categorical(probs)
             cls_pred_index_sample = dist.sample()
 
@@ -575,7 +584,14 @@ while nb_iter <= args.total_iter:
         parts_loss_cls['sem'] = (sem_loss.mean(dim=1) * weight_sem).mean()
         with torch.no_grad():
             _, cls_pred_index_determine = torch.max(sem_cls_pred, dim=2)  # cls_pred_index (64, 51)
-            probs = torch.softmax(sem_cls_pred, dim=2)
+            # probs = torch.softmax(sem_cls_pred, dim=2)
+            # 对semantic部分也做同样的处理
+            sem_logits = sem_cls_pred
+            sem_logits = sem_logits - sem_logits.max(dim=-1, keepdim=True)[0]
+            sem_probs = torch.softmax(sem_logits, dim=2)
+            
+            if torch.isnan(sem_probs).any():
+                sem_probs = torch.ones_like(sem_probs) / sem_probs.size(-1)
             dist = Categorical(probs)
             cls_pred_index_sample = dist.sample()
             right_num_determine['sem'] += (cls_pred_index_determine == sem_token).sum().item()
