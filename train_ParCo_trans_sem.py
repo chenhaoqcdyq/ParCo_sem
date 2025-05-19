@@ -52,10 +52,14 @@ assert select_vqvae_ckpt in [
 ]
 vqvae_train_dir = args.vqvae_train_dir
 # Checkpoint path
-if select_vqvae_ckpt == 'last':
-    args.vqvae_ckpt_path = os.path.join(vqvae_train_dir, 'net_' + select_vqvae_ckpt + '.pth')
+if vqvae_train_dir.endswith('.pth'):
+    args.vqvae_ckpt_path = vqvae_train_dir
+    vqvae_train_dir = os.path.dirname(vqvae_train_dir)
 else:
-    args.vqvae_ckpt_path = os.path.join(vqvae_train_dir, 'net_best_' + select_vqvae_ckpt + '.pth')
+    if select_vqvae_ckpt == 'last':
+        args.vqvae_ckpt_path = os.path.join(vqvae_train_dir, 'net_' + select_vqvae_ckpt + '.pth')
+    else:
+        args.vqvae_ckpt_path = os.path.join(vqvae_train_dir, 'net_best_' + select_vqvae_ckpt + '.pth')
 
 # vqvae training config
 print('\nLoading training argument...\n')

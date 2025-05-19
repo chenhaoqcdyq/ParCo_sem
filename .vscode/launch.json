@@ -278,8 +278,8 @@
         "--quantizer=ema_reset",
         "--dilation-growth-rate=3",
         "--vq-act=relu",
-        "--use-existing-vq-data",
-        "--existing-vq-data-dir=output/01009-t2m-v26_dual/00002-Trans-ParCo_multipart-default/quantized_dataset_t2m"
+        // "--use-existing-vq-data",
+        // "--existing-vq-data-dir=output/01009-t2m-v26_dual/00002-Trans-ParCo_multipart-default/quantized_dataset_t2m"
       ],
       "justMyCode": false,
       "env": {

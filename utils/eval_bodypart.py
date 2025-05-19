@@ -234,7 +234,7 @@ def evaluation_vqvae(out_dir, val_loader, net, logger, writer, nb_iter, best_fid
 
 
 @torch.no_grad()
-def evaluation_transformer_batch(out_dir, val_loader, net, trans, logger, writer, nb_iter, best_fid, best_iter, best_div, best_top1, best_top2, best_top3, best_matching, clip_model, eval_wrapper, draw = True, save = True, savegif=False) :
+def evaluation_transformer_batch(out_dir, val_loader, net, trans, logger, writer, nb_iter, best_fid, best_iter, best_div, best_top1, best_top2, best_top3, best_matching, clip_model, eval_wrapper, draw = True, save = True, savegif=False, semantic_flag=False) :
     """
     This is used for evaluate GPT at training stage.
     It excludes the multi-modality evaluation by simply set a circle only at 1 time.
@@ -273,6 +273,8 @@ def evaluation_transformer_batch(out_dir, val_loader, net, trans, logger, writer
             # [Text-to-motion Generation] get generated parts' token sequence
             # get parts_index_motion given the feat_clip_text
             batch_parts_index_motion = trans.sample_batch(feat_clip_text, False)  # List: [(B, seq_len), ..., (B, seq_len)]
+            if semantic_flag:
+                batch_parts_index_motion = [batch_parts_index_motion[i][:, trans.semantic_len:] for i in range(len(batch_parts_index_motion))]
 
             max_motion_seq_len = batch_parts_index_motion[0].shape[1]
             if isinstance(batch_parts_index_motion, torch.Tensor):
@@ -308,7 +310,7 @@ def evaluation_transformer_batch(out_dir, val_loader, net, trans, logger, writer
                 for j in range(len(parts_index_motion)):
                     if min_motion_seq_len == 0:
                         # assign a nonsense motion index to handle length is 0 issue.
-                        parts_index_motion[j] = torch.ones(1,1).cuda().long()  # (B, seq_len) B==1, seq_len==1
+                        parts_index_motion[j] = torch.ones(1,4).cuda().long()  # (B, seq_len) B==1, seq_len==1
                     else:
                         parts_index_motion[j] = parts_index_motion[j][:,:min_motion_seq_len]
 
