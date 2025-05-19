@@ -304,6 +304,7 @@ loss_ce_batch = torch.nn.CrossEntropyLoss(ignore_index=train_loader.dataset.mot_
 
 nb_iter = 0
 nb_sample_train = 0
+nb_sample_sem_train = 0
 avg_loss_cls = {
     'Root': 0.,
     'R_Leg': 0.,
@@ -611,6 +612,8 @@ while nb_iter <= args.total_iter:
         avg_loss_cls['sem'] = avg_loss_cls['sem'] + parts_loss_cls['sem'].item()
 
     nb_sample_train = nb_sample_train + (m_tokens_len + 1).sum().item()
+    if sem_token is not None:
+        nb_sample_sem_train = nb_sample_sem_train + (sem_token_len + 1).sum().item()
 
     nb_iter += 1
     if nb_iter % args.print_iter == 0:
@@ -629,8 +632,8 @@ while nb_iter <= args.total_iter:
             right_num_sample[name] = 0
         if sem_token is not None:
             avg_loss_cls['sem'] = avg_loss_cls['sem'] / args.print_iter
-            avg_acc_determine['sem'] = right_num_determine['sem'] * 100 / nb_sample_train
-            avg_acc_sample['sem'] = right_num_sample['sem'] * 100 / nb_sample_train
+            avg_acc_determine['sem'] = right_num_determine['sem'] * 100 / nb_sample_sem_train
+            avg_acc_sample['sem'] = right_num_sample['sem'] * 100 / nb_sample_sem_train
             writer.add_scalar('./Loss/train_sem', avg_loss_cls['sem'], nb_iter)
             writer.add_scalar('./ACC_determine/train_sem', avg_acc_determine['sem'], nb_iter)
             writer.add_scalar('./ACC_sample/train_sem', avg_acc_sample['sem'], nb_iter)
@@ -641,7 +644,7 @@ while nb_iter <= args.total_iter:
 
         logger.info(msg)
         nb_sample_train = 0
-
+        nb_sample_sem_train = 0
     if nb_iter % args.eval_iter == 0:
         best_fid, best_iter, best_div, best_top1, best_top2, best_top3, best_matching, writer, logger = \
             eval_bodypart.evaluation_transformer_batch(

@@ -311,6 +311,8 @@ def evaluation_transformer_batch(out_dir, val_loader, net, trans, logger, writer
                     if min_motion_seq_len == 0:
                         # assign a nonsense motion index to handle length is 0 issue.
                         parts_index_motion[j] = torch.ones(1,4).cuda().long()  # (B, seq_len) B==1, seq_len==1
+                    elif min_motion_seq_len < 4:
+                        parts_index_motion[j] = torch.cat([parts_index_motion[j], torch.ones(1, 4 - min_motion_seq_len).cuda().long()], dim=1)  # (B, seq_len) B==1, seq_len==1
                     else:
                         parts_index_motion[j] = parts_index_motion[j][:,:min_motion_seq_len]
 
