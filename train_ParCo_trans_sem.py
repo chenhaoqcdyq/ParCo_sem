@@ -471,8 +471,11 @@ while nb_iter <= args.total_iter:
                 mask = torch.bernoulli(args.pkeep * torch.ones(input_p.shape, device=input_p.device))
 
             mask = mask.round().to(dtype=torch.int64)
-            # r_indices = torch.randint_like(input_p, args.nb_code)  # random_indices
-            a_indices = mask*input_p + (1-mask)*mask_token_value  # augmented indices
+            if args.rand_index == 1:
+                r_indices = torch.randint_like(input_p, args.nb_code)  # random_indices
+                a_indices = mask*input_p + (1-mask)*r_indices  # augmented indices
+            else:
+                a_indices = mask*input_p + (1-mask)*mask_token_value  # augmented indices
 
             input_parts.append(a_indices)  # collect augmented input indices
         if sem_token is not None:

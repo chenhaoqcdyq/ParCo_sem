@@ -186,6 +186,7 @@ def get_args_parser(args=None):
     parser.add_argument('--pkeep', type=float, default=1.0, help='keep rate for gpt training, lower pkeep, higher mask rate')
     parser.add_argument("--use-pkeep-scheduler", action='store_true', help="Use pkeep scheduler")
     parser.add_argument("--classfg", type=float, default=0, help="class weight")
+    parser.add_argument("--rand_index", type=int, default=0, help="random index")
 
     if args is None:
         return parser.parse_args()
