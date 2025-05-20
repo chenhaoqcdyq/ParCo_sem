@@ -253,7 +253,7 @@
       // "program": "train_ParCo_rvq_sem_global.py",
       "console": "integratedTerminal",
       "args": [
-        "--vqvae-train-dir=output/01009-t2m-v26_dual/VQVAE-v26_dual-t2m-default",
+        "--vqvae-train-dir=output/01010-t2m-v26_dual/VQVAE-v26_dual-t2m-default/net_last_150000.pth",
         "--select-vqvae-ckpt=last",
         "--exp-name=ParCo_multipart",
         "--pkeep=0.4",
@@ -278,14 +278,15 @@
         "--quantizer=ema_reset",
         "--dilation-growth-rate=3",
         "--vq-act=relu",
-        // "--use-existing-vq-data",
-        // "--existing-vq-data-dir=output/01009-t2m-v26_dual/00002-Trans-ParCo_multipart-default/quantized_dataset_t2m"
+        "--use-existing-vq-data",
+        "--existing-vq-data-dir=output/01010-t2m-v26_dual/00006-Trans-ParCo_multipart-default/quantized_dataset_t2m",
+        "--resume-trans=output/01010-t2m-v26_dual/00009-Trans-ParCo_multipart-default/net_last.pth"
       ],
       "justMyCode": false,
       "env": {
         "PYTHONPATH": "${workspaceFolder}/..:${env:PYTHONPATH}",
         "TORCH_DISTRIBUTED_DEBUG": "INFO",
-        "CUDA_VISIBLE_DEVICES": "0",
+        "CUDA_VISIBLE_DEVICES": "1",
         "TOKENIZERS_PARALLELISM": "false"
       }
     }

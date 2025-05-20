@@ -99,7 +99,7 @@ def render(motions, outdir='test_vis', device_id=0, name=None, pred=True):
 
         mesh = Trimesh(vertices=vertices[0, :, :, i].squeeze().tolist(), faces=faces)
 
-        base_color = (0.11, 0.53, 0.8, 0.5)
+        base_color = (0.93, 0.79, 0.05, 0.5)  # Yellow color
         ## OPAQUE rendering without alpha
         ## BLEND rendering consider alpha
         material = pyrender.MetallicRoughnessMaterial(
@@ -219,7 +219,7 @@ def simple_render(motions, motion_file_dir):
 
         mesh = Trimesh(vertices=vertices[0, :, :, i].squeeze().tolist(), faces=faces)
 
-        base_color = (0.11, 0.53, 0.8, 0.5)
+        base_color = (0.93, 0.79, 0.05, 0.5)  # Yellow color
         ## OPAQUE rendering without alpha
         ## BLEND rendering consider alpha
         material = pyrender.MetallicRoughnessMaterial(
@@ -292,9 +292,9 @@ def simple_render(motions, motion_file_dir):
     filename = motion_file_dir.split('/')[-1].split('.')[0]
     working_dir = os.path.dirname(motion_file_dir)
     outdir = os.path.join(working_dir, 'rendered_motion')
-    os.makedirs(outdir)
+    os.makedirs(outdir, exist_ok=True)
     savedir = os.path.join(outdir, filename + '.gif')
-    imageio.mimsave(savedir, out, fps=20)
+    imageio.mimsave(savedir, out, duration=50) # fps=20
 
 
 

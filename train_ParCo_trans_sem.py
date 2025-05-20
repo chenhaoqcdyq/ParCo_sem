@@ -354,13 +354,13 @@ right_num_sample = {
         
 ##### ---- Training ---- #####
 print('\n\n===> Pre-evaluation before training...')
-# best_fid, best_iter, best_div, best_top1, best_top2, best_top3, best_matching, writer, logger = \
-#     eval_bodypart.evaluation_transformer_batch(
-#         args.run_dir, val_loader, net, trans_encoder, logger, writer,
-#         0, best_fid=1000, best_iter=0, best_div=100,
-#         best_top1=0, best_top2=0, best_top3=0, best_matching=100,
-#         clip_model=clip_model, eval_wrapper=eval_wrapper)
-best_fid, best_iter, best_div, best_top1, best_top2, best_top3, best_matching = 1000, 0, 100, 0, 0, 0, 100
+best_fid, best_iter, best_div, best_top1, best_top2, best_top3, best_matching, writer, logger = \
+    eval_bodypart.evaluation_transformer_batch(
+        args.run_dir, val_loader, net, trans_encoder, logger, writer,
+        0, best_fid=1000, best_iter=0, best_div=100,
+        best_top1=0, best_top2=0, best_top3=0, best_matching=100,
+        clip_model=clip_model, eval_wrapper=eval_wrapper, semantic_flag=(vqvae_train_args.lgvq>0), draw=False)
+# best_fid, best_iter, best_div, best_top1, best_top2, best_top3, best_matching = 1000, 0, 100, 0, 0, 0, 100
 time_consuming = {
     'dataloading_time': 0.,
     'text_to_clip_feat_time': 0.,
@@ -666,7 +666,7 @@ while nb_iter <= args.total_iter:
             eval_bodypart.evaluation_transformer_batch(
                 args.run_dir, val_loader, net, trans_encoder, logger, writer, nb_iter,
                 best_fid, best_iter, best_div, best_top1, best_top2, best_top3, best_matching,
-                clip_model=clip_model, eval_wrapper=eval_wrapper, semantic_flag=(vqvae_train_args.lgvq>0))
+                clip_model=clip_model, eval_wrapper=eval_wrapper, semantic_flag=(vqvae_train_args.lgvq>0), draw=False)
 
     if nb_iter == args.total_iter: 
         msg_final = f"Train. Iter {best_iter} : FID. {best_fid:.5f}, Diversity. {best_div:.4f}, TOP1. {best_top1:.4f}, TOP2. {best_top2:.4f}, TOP3. {best_top3:.4f}"

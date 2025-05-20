@@ -274,7 +274,8 @@ def evaluation_transformer_batch(out_dir, val_loader, net, trans, logger, writer
             # get parts_index_motion given the feat_clip_text
             batch_parts_index_motion = trans.sample_batch(feat_clip_text, False)  # List: [(B, seq_len), ..., (B, seq_len)]
             if semantic_flag:
-                batch_parts_index_motion = [batch_parts_index_motion[i][:, trans.semantic_len:] for i in range(len(batch_parts_index_motion))]
+                batch_parts_index_motion_ori = batch_parts_index_motion
+                batch_parts_index_motion = [batch_parts_index_motion[: ,i ,trans.semantic_len:] for i in range(6)]
 
             max_motion_seq_len = batch_parts_index_motion[0].shape[1]
             if isinstance(batch_parts_index_motion, torch.Tensor):
@@ -284,7 +285,8 @@ def evaluation_transformer_batch(out_dir, val_loader, net, trans, logger, writer
                 min_motion_seq_len = max_motion_seq_len
                 parts_index_motion = []
                 for part_index, name in zip(batch_parts_index_motion, ['Root', 'R_Leg', 'L_Leg', 'Backbone', 'R_Arm', 'L_Arm']):
-
+                    if part_index.shape[0] == 0:
+                        print(f'part_index.shape[0] == 0: {name}')
                     # get one sample
                     part_index = part_index[k:k+1]  # (1, seq_len)
 
