@@ -354,13 +354,13 @@ right_num_sample = {
         
 ##### ---- Training ---- #####
 print('\n\n===> Pre-evaluation before training...')
-best_fid, best_iter, best_div, best_top1, best_top2, best_top3, best_matching, writer, logger = \
-    eval_bodypart.evaluation_transformer_batch(
-        args.run_dir, val_loader, net, trans_encoder, logger, writer,
-        0, best_fid=1000, best_iter=0, best_div=100,
-        best_top1=0, best_top2=0, best_top3=0, best_matching=100,
-        clip_model=clip_model, eval_wrapper=eval_wrapper)
-# best_fid, best_iter, best_div, best_top1, best_top2, best_top3, best_matching = 1000, 0, 100, 0, 0, 0, 100
+# best_fid, best_iter, best_div, best_top1, best_top2, best_top3, best_matching, writer, logger = \
+#     eval_bodypart.evaluation_transformer_batch(
+#         args.run_dir, val_loader, net, trans_encoder, logger, writer,
+#         0, best_fid=1000, best_iter=0, best_div=100,
+#         best_top1=0, best_top2=0, best_top3=0, best_matching=100,
+#         clip_model=clip_model, eval_wrapper=eval_wrapper)
+best_fid, best_iter, best_div, best_top1, best_top2, best_top3, best_matching = 1000, 0, 100, 0, 0, 0, 100
 time_consuming = {
     'dataloading_time': 0.,
     'text_to_clip_feat_time': 0.,
@@ -551,7 +551,7 @@ while nb_iter <= args.total_iter:
 
         # re-weight the loss to be same to T2M-GPT
         num = (batch_loss != 0).sum(dim=1)
-        weight = gt_parts[j].shape[1] / num
+        weight = gt_parts[j].shape[1] / (num + 1e-6)
         parts_loss_cls[name] = (batch_loss.mean(dim=1) * weight).mean()
 
         # Accuracy
@@ -565,12 +565,12 @@ while nb_iter <= args.total_iter:
             # predict the class according to their probability distribution
             # 添加数值稳定化处理
             logits = parts_cls_pred[j]
-            logits = logits - logits.max(dim=-1, keepdim=True)[0]  # 减去最大值以提高数值稳定性
+            # logits = logits - logits.max(dim=-1, keepdim=True)[0]  # 减去最大值以提高数值稳定性
             probs = torch.softmax(logits, dim=2)
             
             # 添加安全检查，将NaN值替换为均匀分布
-            if torch.isnan(probs).any():
-                probs = torch.ones_like(probs) / probs.size(-1)
+            # if torch.isnan(probs).any():
+            #     probs = torch.ones_like(probs) / probs.size(-1)
             dist = Categorical(probs)
             cls_pred_index_sample = dist.sample()
 
@@ -580,22 +580,22 @@ while nb_iter <= args.total_iter:
     if sem_token is not None:
         sem_loss = loss_ce_batch(sem_cls_pred.permute(0,2,1), sem_token)
         num_sem = (sem_loss != 0).sum(dim=1)
-        weight_sem = sem_token.shape[1] / num_sem
+        weight_sem = sem_token.shape[1] / (num_sem + 1e-6)
         parts_loss_cls['sem'] = (sem_loss.mean(dim=1) * weight_sem).mean()
         with torch.no_grad():
-            _, cls_pred_index_determine = torch.max(sem_cls_pred, dim=2)  # cls_pred_index (64, 51)
+            _, cls_pred_index_determine_sem = torch.max(sem_cls_pred, dim=2)  # cls_pred_index (64, 51)
             # probs = torch.softmax(sem_cls_pred, dim=2)
             # 对semantic部分也做同样的处理
             sem_logits = sem_cls_pred
-            sem_logits = sem_logits - sem_logits.max(dim=-1, keepdim=True)[0]
+            # sem_logits = sem_logits - sem_logits.max(dim=-1, keepdim=True)[0]
             sem_probs = torch.softmax(sem_logits, dim=2)
             
-            if torch.isnan(sem_probs).any():
-                sem_probs = torch.ones_like(sem_probs) / sem_probs.size(-1)
-            dist = Categorical(probs)
-            cls_pred_index_sample = dist.sample()
-            right_num_determine['sem'] += (cls_pred_index_determine == sem_token).sum().item()
-            right_num_sample['sem'] += (cls_pred_index_sample == sem_token).sum().item()
+            # if torch.isnan(sem_probs).any():
+            #     sem_probs = torch.ones_like(sem_probs) / sem_probs.size(-1)
+            dist_sem = Categorical(sem_probs)
+            cls_pred_index_sample_sem = dist_sem.sample()
+            right_num_determine['sem'] += (cls_pred_index_determine_sem == sem_token).sum().item()
+            right_num_sample['sem'] += (cls_pred_index_sample_sem == sem_token).sum().item()
 
 
 
@@ -666,7 +666,7 @@ while nb_iter <= args.total_iter:
             eval_bodypart.evaluation_transformer_batch(
                 args.run_dir, val_loader, net, trans_encoder, logger, writer, nb_iter,
                 best_fid, best_iter, best_div, best_top1, best_top2, best_top3, best_matching,
-                clip_model=clip_model, eval_wrapper=eval_wrapper)
+                clip_model=clip_model, eval_wrapper=eval_wrapper, semantic_flag=(vqvae_train_args.lgvq>0))
 
     if nb_iter == args.total_iter: 
         msg_final = f"Train. Iter {best_iter} : FID. {best_fid:.5f}, Diversity. {best_div:.4f}, TOP1. {best_top1:.4f}, TOP2. {best_top2:.4f}, TOP3. {best_top3:.4f}"

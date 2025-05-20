@@ -1,0 +1,1 @@
+CUDA_VISIBLE_DEVICES=0 python visualize/render_final.py --filedir /workspace/motion_diffusion/ParCo/output/visualize/000004.npy
