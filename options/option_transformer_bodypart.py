@@ -185,6 +185,7 @@ def get_args_parser(args=None):
     parser.add_argument("--if-maxtest", action='store_true', help="test in max")
     parser.add_argument('--pkeep', type=float, default=1.0, help='keep rate for gpt training, lower pkeep, higher mask rate')
     parser.add_argument("--use-pkeep-scheduler", action='store_true', help="Use pkeep scheduler")
+    parser.add_argument("--classfg", type=float, default=0, help="class weight")
 
     if args is None:
         return parser.parse_args()

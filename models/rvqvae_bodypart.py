@@ -473,10 +473,10 @@ class TemporalDownsamplerV2(nn.Module):
 
 
 
-import matplotlib.pyplot as plt
-import seaborn as sns
-from sklearn.manifold import TSNE
-import numpy as np
+# import matplotlib.pyplot as plt
+# import seaborn as sns
+# from sklearn.manifold import TSNE
+# import numpy as np
 def visualize_tsne(motion_feat, text_feat, filename='tsne_visualization.png'):
     """
     使用t-SNE对motion_feat和text_feat进行可视化，并保存到本地文件

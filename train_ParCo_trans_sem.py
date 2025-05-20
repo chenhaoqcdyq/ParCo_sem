@@ -411,8 +411,12 @@ while nb_iter <= args.total_iter:
     dataloading_time = time.time() - start_time
     start_time = time.time()
 
-    
-    text = clip.tokenize(caption, truncate=True).cuda()  # tokenize the text tuple
+    if args.classfg > 0:
+        # 生成mask来决定哪些样本的文本被替换为空
+        mask = torch.bernoulli(args.classfg * torch.ones(len(caption), device='cuda'))
+        # 创建新的文本列表，将被mask的文本替换为空字符串
+        caption = ["" if mask[i] else caption[i] for i in range(len(caption))]
+    text = clip.tokenize(caption, truncate=True).cuda()
     feat_clip_text = clip_model.encode_text(text).float()  # encode text tokens. (B, 512). 512: clip out feat dim.
 
     '''text-to-clip feature time'''
