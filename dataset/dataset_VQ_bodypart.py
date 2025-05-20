@@ -554,6 +554,7 @@ def DATALoader(dataset_name,
                                               shuffle=True,
                                               #sampler=sampler,
                                               num_workers=num_workers,
+                                              pin_memory=True,
                                               #collate_fn=collate_fn,
                                               drop_last = True)
     

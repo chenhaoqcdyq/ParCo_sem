@@ -1,3 +1,5 @@
+import sys
+sys.path.append('/workspace/motion_diffusion/ParCo')
 from models.rotation2xyz import Rotation2xyz
 import numpy as np
 from trimesh import Trimesh
@@ -326,7 +328,8 @@ if __name__ == "__main__":
 
     filedir = args.filedir
     motions = np.load(filedir)
-    simple_render(motions[0], filedir)
+    print(motions.shape)
+    simple_render(motions, filedir)
 
 
 

@@ -24,6 +24,12 @@ class VQVAE_bodypart(nn.Module):
         self.parts_output_dim = parts_output_dim
         self.parts_hidden_dim = parts_hidden_dim
         self.quantizer_type = args.quantizer
+        self.down_t = down_t
+        self.stride_t = stride_t
+        self.depth = depth
+        self.dilation_growth_rate = dilation_growth_rate
+        self.activation = activation
+        self.norm = norm
 
         if args.dataname == 't2m':
             parts_input_dim = {
@@ -34,7 +40,7 @@ class VQVAE_bodypart(nn.Module):
                 'R_Arm': 60,
                 'L_Arm': 60,
             }
-
+            self.parts_input_dim = parts_input_dim
             for name in self.parts_name:
                 raw_dim = parts_input_dim[name]
                 hidden_dim = parts_hidden_dim[name]
@@ -69,7 +75,7 @@ class VQVAE_bodypart(nn.Module):
                 'R_Arm': 48,
                 'L_Arm': 48,
             }
-
+            self.parts_input_dim = parts_input_dim
             for name in self.parts_name:
                 raw_dim = parts_input_dim[name]
                 hidden_dim = parts_hidden_dim[name]
@@ -111,7 +117,7 @@ class VQVAE_bodypart(nn.Module):
         return x
 
 
-    def encode(self, parts):
+    def encode(self, parts, motion_mask=None):
         """
         This is used in training transformer (train_t2m_trans.py and the parts ver.),
           for getting the embedding(also named tokens, discrete repre) of motions.
@@ -145,6 +151,15 @@ class VQVAE_bodypart(nn.Module):
             quantizer = getattr(self, f'quantizer_{name}')
             code_idx = quantizer.quantize(x_encoder)  # (B*nframes, out_dim) --> (B*nframes)
             code_idx = code_idx.view(N, -1)  # (B, nframes)
+            if motion_mask is not None:
+                if len(motion_mask.shape) == 2:
+                    motion_mask = motion_mask[0]
+                bool_mask = motion_mask.bool()
+                motion_length = bool_mask.sum()
+                # padding
+                code_idx[:, ~bool_mask] = quantizer.nb_code + 1
+                # end token
+                code_idx[:, motion_length] = quantizer.nb_code
 
             tokenized_parts.append(code_idx)
 
@@ -319,8 +334,8 @@ class HumanVQVAEBodyPart(nn.Module):
         self.nb_joints = 21 if args.dataname == 'kit' else 22
         self.vqvae = VQVAE_bodypart(args, parts_code_nb, parts_code_dim, parts_output_dim, parts_hidden_dim, down_t, stride_t, depth, dilation_growth_rate, activation=activation, norm=norm)
 
-    def encode(self, x):
-        quants = self.vqvae.encode(x)
+    def encode(self, x, motion_mask=None):
+        quants = self.vqvae.encode(x, motion_mask)
         return quants
 
     def forward(self, x):

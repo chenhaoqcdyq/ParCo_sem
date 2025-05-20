@@ -29,7 +29,6 @@ Pytorch implementation of paper [ParCo: Part-Coordinating Text-to-Motion Synthes
     <td><img src="docs/imgs/motiondiffuse/motiondiffuse_5.gif" width="160px" alt="gif"></td>
   </tr>
 
-
   <tr>
     <th colspan="4">Text: "standing on one leg and hopping."</th>
   </tr>
@@ -45,7 +44,6 @@ Pytorch implementation of paper [ParCo: Part-Coordinating Text-to-Motion Synthes
     <td><img src="docs/imgs/t2mgpt/t2mgpt_9.gif" width="160px" alt="gif"></td>
     <td><img src="docs/imgs/motiondiffuse/motiondiffuse_9.gif" width="160px" alt="gif"></td>
   </tr>
-
 
   <tr>
     <th colspan="4">Text: "a man steps back, picks something up and put it to his head and then puts it back."</th>
@@ -63,12 +61,11 @@ Pytorch implementation of paper [ParCo: Part-Coordinating Text-to-Motion Synthes
     <td><img src="docs/imgs/motiondiffuse/motiondiffuse_2.gif" width="160px" alt="gif"></td>
   </tr>
 
-
 </table>
 </p>
 
-
 If our project is helpful for your research, please consider **starring** this repo and **citing** our paper:
+
 ```
 @article{zou2024parco,
   title={ParCo: Part-Coordinating Text-to-Motion Synthesis},
@@ -78,31 +75,29 @@ If our project is helpful for your research, please consider **starring** this r
 }
 ```
 
-## Computational resource consumption 
+## Computational resource consumption
 
 ### Training
+
 Time and GPU memory consumed for training (single A100 GPU):
 
 |        | (Stage-1) VQ-VAE | (Stage-2) Part-Coordinated Transformer |
-|:-------|:----------------:|:--------------------------------------:|
+| :----- | :--------------: | :------------------------------------: |
 | Time   |      20.5h       |                 52.3h                  |
 | Memory |      3.5GB       |                 28.4GB                 |
 
-
 ### Inference
 
-
 | Method       | Param(M) | FLOPs(G) | InferTime(s) |
-|:-------------|:--------:|:--------:|:------------:|
+| :----------- | :------: | :------: | :----------: |
 | ReMoDiffuse  |  198.2   |  481.0   |    0.091     |
 | T2M-GPT      |  237.6   |  292.3   |    0.544     |
 | ParCo (Ours) |  168.4   |  211.7   |    0.036     |
 
 - For the FLOPs metric, we calculate the FLOPs when the model generates a single motion sample of 200 frames.
-- We report the time consumed to generate a single sample for the InferTime metric. 
-  We generated 10,000 samples and calculated the average inference time per sample. 
+- We report the time consumed to generate a single sample for the InferTime metric.
+  We generated 10,000 samples and calculated the average inference time per sample.
   For ReMoDiff and our ParCo, we set the batch size to 100 (T2M-GPT does not support batch parallel inference).
-
 
 ## Table of Content
 
@@ -116,8 +111,6 @@ Time and GPU memory consumed for training (single A100 GPU):
 - [TODO](#todo)
 - [Acknowledgement](#acknowledgement)
 
-
-
 ## 1. Quick Start Demo
 
 ### 1.1. Colab Demo
@@ -127,9 +120,9 @@ Time and GPU memory consumed for training (single A100 GPU):
 Our demo shows how to prepare the environment and inference with ParCo.
 You can also conveniently explore our ParCo.
 
-If you wish to reproduce the visualization results of ParCo, 
-we recommend installing the environment locally following our tutorial and reproducing it there 
-(as results differ between Colab and local runs). 
+If you wish to reproduce the visualization results of ParCo,
+we recommend installing the environment locally following our tutorial and reproducing it there
+(as results differ between Colab and local runs).
 This is likely due to differences in GPU and CUDA environment between Colab and local training/testing.
 
 <p align="center">
@@ -138,7 +131,7 @@ This is likely due to differences in GPU and CUDA environment between Colab and 
 
 ### 1.2. Local Quick Inference
 
-After the installation completed, 
+After the installation completed,
 you can directly generate motion (.gif format) with your own text input as following:
 
 ```
@@ -149,6 +142,7 @@ CUDA_VISIBLE_DEVICES=0 python visualize/infer_motion_npy.py \
 --input-text 'an idol trainee is dancing like a basketball dribbling.' \
 --skip-path-check
 ```
+
 The generated motion visual sample is saved as `output/visualize/XXXXX-userinput/skeleton_viz.gif`.
 
 <p align="center">
@@ -164,26 +158,24 @@ with software environment: Python 3.7.11, PyTorch 1.10.1, CUDA 11.3.1, cuDNN 8.2
 
 - CUDA & cuDNN (cuDNN may not be necessary)
 
-    CUDA and cuDNN should be installed first. We use following version:
-    `CUDA: 11.3.1` and `cuDNN: 8.2.0`.
+  CUDA and cuDNN should be installed first. We use following version:
+  `CUDA: 11.3.1` and `cuDNN: 8.2.0`.
 
   - Install CUDA 11.3:
     1. Download from [here](https://developer.nvidia.com/cuda-11-3-1-download-archive)
        (we recommend to choose installer type as `runfile (local)`.
     1. Install the runfile using the scripts given by the official website.
-    1. Before running our code, check if your CUDA environment is linked to CUDA 11.3 (run `nvcc --version` to check). 
-    If the version is not 11.3, you need to add the CUDA path into your environment by `export PATH=/usr/local/cuda-11.3/bin:$PATH`,
-    then check the version again.
-    
+    1. Before running our code, check if your CUDA environment is linked to CUDA 11.3 (run `nvcc --version` to check).
+       If the version is not 11.3, you need to add the CUDA path into your environment by `export PATH=/usr/local/cuda-11.3/bin:$PATH`,
+       then check the version again.
   - Install cuDNN 8.2.0:
     1. Download from [here](https://developer.nvidia.com/rdp/cudnn-archive) (select `8.2.0 for CUDA 11.X` and `cuDNN Library for Linux/Windows` according to your system)
     1. Install the cuDNN according to this [guide](https://docs.nvidia.com/deeplearning/cudnn/archives/cudnn-820/install-guide/index.html#installlinux-tar).
-    Refer to Section `2.3.1. Tar File Installation` since we download tar file at previous stage.
-
+       Refer to Section `2.3.1. Tar File Installation` since we download tar file at previous stage.
 
 - Conda environment
-  
-  You need to following these scripts below to avoid potential package conflicts. 
+
+  You need to following these scripts below to avoid potential package conflicts.
   Otherwise, it may be unable to install PyTorch properly or fail to install some packages.
 
   - Create conda environment
@@ -194,13 +186,16 @@ with software environment: Python 3.7.11, PyTorch 1.10.1, CUDA 11.3.1, cuDNN 8.2
     conda activate ParCo
     ```
   - Install essential packages (execute all scripts below)
+
     ```
     conda install ffmpeg=4.3 -c pytorch
     conda install pytorch==1.10.1 torchvision==0.11.2 torchaudio==0.10.1 cudatoolkit=11.3 -c pytorch -c conda-forge
     ```
-    ``` 
+
+    ```
     pip install absl-py==0.13.0 backcall==0.2.0 cachetools==4.2.2 charset-normalizer==2.0.4 chumpy==0.70 cycler==0.10.0 decorator==5.0.9 google-auth==1.35.0 google-auth-oauthlib==0.4.5 grpcio==1.39.0 idna==3.2 imageio==2.9.0 ipdb==0.13.9 ipython==7.26.0 ipython-genutils==0.2.0 jedi==0.18.0 joblib==1.0.1 kiwisolver==1.3.1 markdown==3.3.4 matplotlib==3.4.3 matplotlib-inline==0.1.2 oauthlib==3.1.1 pandas==1.3.2 parso==0.8.2 pexpect==4.8.0 pickleshare==0.7.5 prompt-toolkit==3.0.20 protobuf==3.17.3 ptyprocess==0.7.0 pyasn1==0.4.8 pyasn1-modules==0.2.8 pygments==2.10.0 pyparsing==2.4.7 python-dateutil==2.8.2 pytz==2021.1 pyyaml==5.4.1 requests==2.26.0 requests-oauthlib==1.3.0 rsa==4.7.2 scikit-learn==0.24.2 scipy==1.7.1 sklearn==0.0 smplx==0.1.28 tensorboard==2.6.0 tensorboard-data-server==0.6.1 tensorboard-plugin-wit==1.8.0 threadpoolctl==2.2.0 toml==0.10.2 tqdm==4.62.2 traitlets==5.0.5 urllib3==1.26.6 wcwidth==0.2.5 werkzeug==2.0.1 git+https://github.com/openai/CLIP.git git+https://github.com/nghorbani/human_body_prior gdown moviepy
     ```
+
     ```
     pip install imageio-ffmpeg
     pip install importlib-metadata==4.13.0
@@ -221,12 +216,15 @@ with software environment: Python 3.7.11, PyTorch 1.10.1, CUDA 11.3.1, cuDNN 8.2
 We use the extractors provided by [T2M](https://github.com/EricGuo5513/text-to-motion) for evaluation.
 Please download the extractors and glove word vectorizer. Note that 'zip' should be pre-installed in your system, if not, run
 `sudo apt-get install zip` to install zip.
+
 ```
 bash dataset/prepare/download_glove.sh
 bash dataset/prepare/download_extractor.sh
 ```
+
 If you are using proxy to access Google Drive, use scripts below for downloading.
 Default proxy port in the script is set to `1087`, you can modify the scripts to set your own proxy port.
+
 ```
 bash dataset/prepare/use_proxy/download_glove.sh
 bash dataset/prepare/use_proxy/download_extractor.sh
@@ -234,18 +232,19 @@ bash dataset/prepare/use_proxy/download_extractor.sh
 
 ### 2.3. Datasets
 
-Two 3D human motion-language datasets, [HumanML3D](https://github.com/EricGuo5513/HumanML3D) and [KIT-ML](https://arxiv.org/pdf/1607.03827.pdf), are used by our project. 
+Two 3D human motion-language datasets, [HumanML3D](https://github.com/EricGuo5513/HumanML3D) and [KIT-ML](https://arxiv.org/pdf/1607.03827.pdf), are used by our project.
 You can find preparation and acquisition for both datasets [[here]](https://github.com/EricGuo5513/HumanML3D).
 
 You can also directly download these datasets processed by us: [[Google Drive]](https://drive.google.com/drive/folders/1BuxQWAWtxwauD7AqF0TIpWjoqujYKq8v?usp=share_link).
 
 The file directory should look like:
+
 ```
 ./dataset/HumanML3D/
 ├── new_joint_vecs/
 ├── texts/
-├── Mean.npy # same as in [HumanML3D](https://github.com/EricGuo5513/HumanML3D) 
-├── Std.npy # same as in [HumanML3D](https://github.com/EricGuo5513/HumanML3D) 
+├── Mean.npy # same as in [HumanML3D](https://github.com/EricGuo5513/HumanML3D)
+├── Std.npy # same as in [HumanML3D](https://github.com/EricGuo5513/HumanML3D)
 ├── train.txt
 ├── val.txt
 ├── test.txt
@@ -256,6 +255,7 @@ The file directory should look like:
 ## 3. Train ParCo
 
 The experiment directory structure of our project is:
+
 ```
 ./output  (arg.out_dir)
  ├── 00000-DATASET  (exp_number + dataset_name)
@@ -282,13 +282,12 @@ The experiment directory structure of our project is:
  ...
 ```
 
-
 ### 3.1. VQ-VAE
 
 For KIT dataset, set `--dataname kit`.
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python train_ParCo_vq.py \
+CUDA_VISIBLE_DEVICES=0 python train_ParCo_rvq.py \
 --out-dir output \
 --exp-name ParCo \
 --dataname t2m \
@@ -341,11 +340,12 @@ CUDA_VISIBLE_DEVICES=0 python train_ParCo_trans.py \
 --vq-act relu
 ```
 
-
 ## 4. Evaluation
+
 ### 4.1. VQ-VAE
 
 Remember to set `--vqvae-train-dir` to the VQ-VAE you want to evaluate.
+
 ```bash
 CUDA_VISIBLE_DEVICES=0 python eval_ParCo_vq.py --vqvae-train-dir output/00000-t2m-ParCo/VQVAE-ParCo-t2m-default/ --select-vqvae-ckpt last
 ```
@@ -356,6 +356,7 @@ For evaluation on KIT-ML dataset, set `--select-ckpt last`.
 If you want to evaluate the MultiModality (which takes a long time), just delete `--skip-mmod`.
 
 Remember to set `--eval-exp-dir` to your trained ParCo's directory.
+
 ```bash
 CUDA_VISIBLE_DEVICES=0 python eval_ParCo_trans.py \
 --eval-exp-dir output/00000-t2m-ParCo/VQVAE-ParCo-t2m-default/00000-Trans-ParCo-default \
@@ -363,14 +364,13 @@ CUDA_VISIBLE_DEVICES=0 python eval_ParCo_trans.py \
 --skip-mmod
 ```
 
-
-
 ## 5. Pre-trained Models
 
 Our pretrained models are provided at [[Google Drive]](https://drive.google.com/drive/folders/1MNiA76kChAPVZyhiwHFpOcoqz1mcZIhL?usp=share_link).
 Extract the .zip files and put them under `output` folder for evaluation.
 
 You can also run following scripts to prepare the pretrained models:
+
 ```bash
 mkdir output
 cd output
@@ -379,10 +379,10 @@ unzip ParCo_official_model_weights_HumanML3D.zip
 cd ..
 ```
 
-For model trained on KIT-ML, replace the gdown downloading command with `gdown 1_D9vqIhMv5-oz6qfiTGKjsxhS5DNP0PB` 
+For model trained on KIT-ML, replace the gdown downloading command with `gdown 1_D9vqIhMv5-oz6qfiTGKjsxhS5DNP0PB`
 and unzip command with `unzip ParCo_official_model_weights_KIT-ML.zip`.
 
-Since we renamed the directory of pre-trained models, remember to set `--skip-path-check` when evaluating our Part-Coordinated transformer. For example: 
+Since we renamed the directory of pre-trained models, remember to set `--skip-path-check` when evaluating our Part-Coordinated transformer. For example:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python eval_ParCo_trans.py \
@@ -393,8 +393,10 @@ CUDA_VISIBLE_DEVICES=0 python eval_ParCo_trans.py \
 ```
 
 ## 6. ParCo with up&low body partition
+
 Our ParCo adopts 6-part partition strategy.
 If you want to investigate ParCo with upper and lower body partition, run the scripts below.
+
 <details>
 <summary>
 Details
@@ -421,10 +423,9 @@ Details
     --loss-vel 0.5 \
     --recons-loss l1_smooth
     ```
-    
   - Part-Coordinated Transformer (Up&Low)
 
-    Remember to set `--vqvae-train-dir` to the corresponding directory of the VQ-VAE you trained. 
+    Remember to set `--vqvae-train-dir` to the corresponding directory of the VQ-VAE you trained.
 
     ```
     CUDA_VISIBLE_DEVICES=0 python utils/ParCo_uplow/train_ParCo_trans_uplow.py \
@@ -454,7 +455,7 @@ Details
     --dilation-growth-rate 3 \
     --vq-act relu
     ```
-    
+
 - Evaluation:
 
   Similar to the scripts of 6-part, just change the running scripts to the scripts under `utils/ParCo_uplow/` directory.
@@ -466,22 +467,23 @@ Details
   --select-ckpt fid \
   --skip-mmod
   ```
+
   Remember to set `--eval-exp-dir` to your trained model's directory.
-  
+
 </details>
-
-
 
 ## 7. Visualize Motion
 
 Render SMPL mesh:
 
 - Option-1: Use the tool provided by us (some adopted from [T2M-GPT](https://github.com/Mael-zys/T2M-GPT)):
+
   1. Generate motions in `.npy` format:
-  
-     The generated results will be saved under `output/visualize/`. 
-  
+
+     The generated results will be saved under `output/visualize/`.
+
      Choose your preferred mode:
+
      - input text by user:
        ```
        CUDA_VISIBLE_DEVICES=0 python visualize/infer_motion_npy.py \
@@ -499,47 +501,45 @@ Render SMPL mesh:
        --infer-mode testset \
        --skip-path-check
        ```
+
   1. Render the `.npy` motion file:
-  
+
      Remember to install the packages for rendering (in 2.1. Environment).
-     Set `--filedir` to your own motion file directory. 
-     
+     Set `--filedir` to your own motion file directory.
+
      The rendered result will be saved at the same directory with your motion file under `rendered_motion` folder.
      For example:
-  
+
      ```
-     CUDA_VISIBLE_DEVICES=0 python visualize/render_final.py --filedir output/visualize/00000-userinput/motion.npy 
+     CUDA_VISIBLE_DEVICES=0 python visualize/render_final.py --filedir output/visualize/00000-userinput/motion.npy
      ```
+
      You will get a rendered `.gif` motion. For example:
      <p align="center">
        <img src="docs/imgs/rendered_motion_example.gif" width="20%" />
      </p>
-  
 
 - Option-2 (Recommended): refer to [MLD](https://github.com/chenfengye/motion-latent-diffusion?tab=readme-ov-file).
 
-
 ## TODO
+
 - [x] Add Demo
 - [x] Visualization tutorial for rendered motion
 - [x] README_zh.md
 
-
 ## Acknowledgement
 
 We thank for:
-- Public Codes: 
-[T2M-GPT](https://github.com/Mael-zys/T2M-GPT), 
-[MLD](https://github.com/chenfengye/motion-latent-diffusion?tab=readme-ov-file),
-[MotionDiffuse](https://github.com/mingyuan-zhang/MotionDiffuse), 
-[T2M](https://github.com/EricGuo5513/text-to-motion),
-[TM2T](https://github.com/EricGuo5513/TM2T), 
-[MDM](https://github.com/GuyTevet/motion-diffusion-model),
-etc.
+
+- Public Codes:
+  [T2M-GPT](https://github.com/Mael-zys/T2M-GPT),
+  [MLD](https://github.com/chenfengye/motion-latent-diffusion?tab=readme-ov-file),
+  [MotionDiffuse](https://github.com/mingyuan-zhang/MotionDiffuse),
+  [T2M](https://github.com/EricGuo5513/text-to-motion),
+  [TM2T](https://github.com/EricGuo5513/TM2T),
+  [MDM](https://github.com/GuyTevet/motion-diffusion-model),
+  etc.
 - Public Datasets: [HumanML3D](https://github.com/EricGuo5513/HumanML3D) and [KIT-ML](https://arxiv.org/pdf/1607.03827.pdf).
 
 Other awesome public codes from Text-to-Motion community:
-[ReMoDiffuse](https://github.com/mingyuan-zhang/ReMoDiffuse), [AttT2M](https://github.com/ZcyMonkey/AttT2M), etc. 
-
-
-
+[ReMoDiffuse](https://github.com/mingyuan-zhang/ReMoDiffuse), [AttT2M](https://github.com/ZcyMonkey/AttT2M), etc.

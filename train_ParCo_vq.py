@@ -102,7 +102,7 @@ if args.dataname == 'kit':
     args.nb_joints = 21
     
 else :
-    dataset_opt_path = 'checkpoints/t2m/Comp_v6_KLD005/opt.txt'
+    dataset_opt_path = 'checkpoints/t2m/Comp_v6_KLD01/opt.txt'
     args.nb_joints = 22
 
 logger.info(f'Training on {args.dataname}, motions are with {args.nb_joints} joints')

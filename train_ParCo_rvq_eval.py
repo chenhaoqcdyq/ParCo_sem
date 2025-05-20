@@ -7,20 +7,19 @@ import torch
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
 
-# from dataset import dataset_VQ_bodypart, dataset_TM_eval_bodypart
-from dataset import dataset_VQ_bodypart_text, dataset_TM_eval_bodypart
-from models import vqvae_bodypart as vqvae
+from dataset import dataset_VQ_bodypart_vqvae_eval, dataset_TM_eval_bodypart
+from models import rvqvae_bodypart as vqvae
 from models.evaluator_wrapper import EvaluatorModelWrapper
 
 from options.get_eval_option import get_opt
 import options.option_vq_bodypart as option_vq
-from options.option_vq_bodypart import vqvae_bodypart_cfg
+from options.option_vq_bodypart import vqvae_bodypart_cfg, vqvae_bodypart_cfg_plus
 
 import utils.losses as losses
 import utils.utils_model as utils_model
 import utils.eval_bodypart as eval_bodypart
 from utils.word_vectorizer import WordVectorizer
-from models import semantic
+
 # warnings.filterwarnings('ignore')
 
 
@@ -36,8 +35,11 @@ def update_lr_warm_up(optimizer, nb_iter, warm_up_iter, lr):
 ##### ---- Parse args ---- #####
 args = option_vq.get_args_parser()
 torch.manual_seed(args.seed)
-args.vqvae_arch_cfg = vqvae_bodypart_cfg[args.vqvae_cfg]
-
+# args.vqvae_arch_cfg = vqvae_bodypart_cfg[args.vqvae_cfg]
+if args.bodyconfig == True:
+    args.vqvae_arch_cfg = vqvae_bodypart_cfg_plus[args.vqvae_cfg]
+else:
+    args.vqvae_arch_cfg = vqvae_bodypart_cfg[args.vqvae_cfg]
 ##### ---- Exp dirs ---- #####
 """
 Directory of our exp:
@@ -111,48 +113,68 @@ logger.info(f'Training on {args.dataname}, motions are with {args.nb_joints} joi
 wrapper_opt = get_opt(dataset_opt_path, torch.device('cuda'))
 eval_wrapper = EvaluatorModelWrapper(wrapper_opt)
 
-
-##### ---- Dataloader ---- #####
-print('\n\n===> Constructing dataset and dataloader...\n\n')
-train_loader = dataset_VQ_bodypart_text.DATALoader(args.dataname,
-                                        args.batch_size,
-                                        window_size=args.window_size,
-                                        unit_length=2**args.down_t)
-
-train_loader_iter = dataset_VQ_bodypart_text.cycle(train_loader)
-
-val_loader = dataset_TM_eval_bodypart.DATALoader(args.dataname, False,
-                                        32,
-                                        w_vectorizer,
-                                        unit_length=2**args.down_t)
-
 ##### ---- Network ---- #####
 print('\n\n===> Constructing network...')
-net = semantic.SemanticVQVAE(
-    args,  # use args to define different parameters in different quantizers
-    args.vqvae_arch_cfg['parts_code_nb'],
-    args.vqvae_arch_cfg['parts_code_dim'],
-    args.vqvae_arch_cfg['parts_output_dim'],
-    args.vqvae_arch_cfg['parts_hidden_dim'],
-    args.down_t,
-    args.stride_t,
-    args.depth,
-    args.dilation_growth_rate,
-    args.vq_act,
-    args.vq_norm
-)
-net.load_checkpoint('output/ParCo_official_HumanML3D/VQVAE-ParCo-t2m-default/net_last.pth')
-
+net = getattr(vqvae, f'HumanVQVAETransformerV{args.vision}')(args,  # use args to define different parameters in different quantizers
+        parts_code_nb=args.vqvae_arch_cfg['parts_code_nb'],
+        parts_code_dim=args.vqvae_arch_cfg['parts_code_dim'],
+        parts_output_dim=args.vqvae_arch_cfg['parts_output_dim'],
+        parts_hidden_dim=args.vqvae_arch_cfg['parts_hidden_dim'],
+        down_t=args.down_t,
+        stride_t=args.stride_t,
+        depth=args.depth,
+        dilation_growth_rate=args.dilation_growth_rate,
+        activation=args.vq_act,
+        norm=args.vq_norm
+    )
+# net.load_checkpoint("output/00178-t2m-ParCo/VQVAE-ParCo-t2m-default/net_best_fid.pth")
+# net.load_checkpoint("output/00239-t2m-rvq_sem/VQVAE-rvq_sem-t2m-default/net_last.pth")
+# net.load_without_vqvae("output/00286-t2m-sem_plus/VQVAE-sem_plus-t2m-default/net_last.pth")
+# net.load_vqvae("output/ParCo_official_HumanML3D/VQVAE-ParCo-t2m-default/net_best_fid.pth")
 if args.resume_pth:
     logger.info('loading checkpoint from {}'.format(args.resume_pth))
     ckpt = torch.load(args.resume_pth, map_location='cpu')
     net.load_state_dict(ckpt['net'], strict=True)
 net.train()
 net.cuda()
+# net.eval()
 
+##### ---- Dataloader ---- #####
+print('\n\n===> Constructing dataset and dataloader...\n\n')
+train_loader = dataset_VQ_bodypart_vqvae_eval.DATALoader(args, args.dataname,
+                                        args.batch_size,
+                                        window_size=args.window_size,
+                                        unit_length=2**args.down_t)
+
+train_loader_iter = dataset_VQ_bodypart_vqvae_eval.cycle(train_loader)
+
+val_loader = dataset_TM_eval_bodypart.DATALoader(args.dataname, False,
+                                        32,
+                                        w_vectorizer,
+                                        unit_length=2**args.down_t)
 ##### ---- Optimizer & Scheduler ---- #####
 print('\n===> Constructing optimizer, scheduler, and Loss...')
+def get_optimizer_params(net, base_lr, vqvae_lr):
+    params = []
+    for name, param in net.named_parameters():
+        if 'vqvae' in name and 'enhancedvqvae' not in name:
+            params.append({'params': param, 'lr': vqvae_lr})
+        else:
+            params.append({'params': param, 'lr': base_lr})
+    return params
+
+# optimizer_params = get_optimizer_params(net, args.lr, args.lr * 0.1)
 optimizer = optim.AdamW(net.parameters(), lr=args.lr, betas=(0.9, 0.99), weight_decay=args.weight_decay)
+# optimizer = optim.AdamW(optimizer_params, betas=(0.9, 0.99), weight_decay=args.weight_decay)
+# optimizer = optim.AdamW([
+#                          {'params': net.vqvae.parameters(), 'lr': args.lr * 0.1},
+#                          {'params': net.enhancedvqvae.cmt.parameters(), 'lr': args.lr},
+#                          {'params': net.enhancedvqvae.text_proj.parameters(), 'lr': args.lr},
+#                          {'params': net.enhancedvqvae.null_contrast_proj.parameters(), 'lr': args.lr},
+#                          {'params': net.enhancedvqvae.motion_text_proj.parameters(), 'lr': args.lr},     
+#                          {'params': net.enhancedvqvae.motion_proj.parameters(), 'lr': args.lr},                   
+#                         ],
+#                         betas=(0.9, 0.99), weight_decay=args.weight_decay)
 scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=args.lr_scheduler, gamma=args.gamma)
 Loss = losses.ReConsLossBodyPart(args.recons_loss, args.nb_joints)
 
@@ -160,20 +182,20 @@ Loss = losses.ReConsLossBodyPart(args.recons_loss, args.nb_joints)
 print('\n===> Start warm-up training\n\n')
 
 avg_recons, avg_perplexity, avg_commit = 0., 0., 0.
-
+avg_contrastive = 0.
 for nb_iter in range(1, args.warm_up_iter):
     
     optimizer, current_lr = update_lr_warm_up(optimizer, nb_iter, args.warm_up_iter, args.lr)
 
-    gt_parts, text, text_tokens= next(train_loader_iter)
+    gt_parts, text, text_id, motion_len = next(train_loader_iter)
     for i in range(len(gt_parts)):
         gt_parts[i] = gt_parts[i].cuda().float()
 
-    pred_parts, loss_commit_list, perplexity_list = net(gt_parts, text_tokens.cuda())
+    pred_parts, loss_commit_list, perplexity_list, contrastive_loss = net(gt_parts, text)
 
-    pred_parts_vel = dataset_VQ_bodypart_text.get_each_part_vel(
+    pred_parts_vel = dataset_VQ_bodypart_vqvae_eval.get_each_part_vel(
         pred_parts, mode=args.dataname)
-    gt_parts_vel = dataset_VQ_bodypart_text.get_each_part_vel(
+    gt_parts_vel = dataset_VQ_bodypart_vqvae_eval.get_each_part_vel(
         gt_parts, mode=args.dataname)
 
     loss_motion_list = Loss(pred_parts, gt_parts)  # parts motion reconstruction loss
@@ -183,7 +205,7 @@ for nb_iter in range(1, args.warm_up_iter):
     loss_commit = losses.gather_loss_list(loss_commit_list)
     loss_vel = losses.gather_loss_list(loss_vel_list)
 
-    loss = loss_motion + args.commit * loss_commit + args.loss_vel * loss_vel
+    loss = loss_motion + args.commit * loss_commit + args.loss_vel * loss_vel + contrastive_loss
 
 
     optimizer.zero_grad()
@@ -194,17 +216,20 @@ for nb_iter in range(1, args.warm_up_iter):
     perplexity = losses.gather_loss_list(perplexity_list)
     avg_perplexity += perplexity.item()
     avg_commit += loss_commit.item()
+    avg_contrastive += contrastive_loss.item()
     
     if nb_iter % args.print_iter == 0:
         avg_recons /= args.print_iter
         avg_perplexity /= args.print_iter
         avg_commit /= args.print_iter
+        avg_contrastive /= args.print_iter
         
         logger.info(f"Warmup. Iter {nb_iter} :  lr {current_lr:.5f} \t Commit. {avg_commit:.5f} \t PPL. {avg_perplexity:.2f} \t Recons.  {avg_recons:.5f}")
-        
+        logger.info(f"Contrastive loss: {avg_contrastive:.5f}")
         avg_recons, avg_perplexity, avg_commit = 0., 0., 0.
+        avg_contrastive = 0.
 
-best_fid, best_iter, best_div, best_top1, best_top2, best_top3, best_matching, writer, logger = \
+best_fid, best_iter, best_div, best_top1, best_top2, best_top3, best_matching, writer, logger, best_mpjpe = \
     eval_bodypart.evaluation_vqvae(
         args.run_dir, val_loader, net, logger, writer, 0,
         best_fid=1000, best_iter=0, best_div=100, best_top1=0, best_top2=0, best_top3=0, best_matching=100,
@@ -213,18 +238,19 @@ best_fid, best_iter, best_div, best_top1, best_top2, best_top3, best_matching, w
 ##### ---- Training ---- #####
 print('\n\n===> Start training\n\n')
 avg_recons, avg_perplexity, avg_commit = 0., 0., 0.
+avg_contrastive = 0.
 
 for nb_iter in range(1, args.total_iter + 1):
 
-    gt_parts, text, text_tokens = next(train_loader_iter)
+    gt_parts, text, text_id, motion_len = next(train_loader_iter)
     for i in range(len(gt_parts)):
         gt_parts[i] = gt_parts[i].cuda().float()
 
-    pred_parts, loss_commit_list, perplexity_list = net(gt_parts, text_tokens.cuda())
+    pred_parts, loss_commit_list, perplexity_list, contrastive_loss = net(gt_parts, text)
 
-    pred_parts_vel = dataset_VQ_bodypart_text.get_each_part_vel(
+    pred_parts_vel = dataset_VQ_bodypart_vqvae_eval.get_each_part_vel(
         pred_parts, mode=args.dataname)
-    gt_parts_vel = dataset_VQ_bodypart_text.get_each_part_vel(
+    gt_parts_vel = dataset_VQ_bodypart_vqvae_eval.get_each_part_vel(
         gt_parts, mode=args.dataname)
 
     loss_motion_list = Loss(pred_parts, gt_parts)  # parts motion reconstruction loss
@@ -235,7 +261,7 @@ for nb_iter in range(1, args.total_iter + 1):
     loss_commit = losses.gather_loss_list(loss_commit_list)
     loss_vel = losses.gather_loss_list(loss_vel_list)
 
-    loss = loss_motion + args.commit * loss_commit + args.loss_vel * loss_vel
+    loss = loss_motion + args.commit * loss_commit + args.loss_vel * loss_vel + contrastive_loss
     
     optimizer.zero_grad()
     loss.backward()
@@ -246,24 +272,29 @@ for nb_iter in range(1, args.total_iter + 1):
     perplexity = losses.gather_loss_list(perplexity_list)
     avg_perplexity += perplexity.item()
     avg_commit += loss_commit.item()
+    avg_contrastive += contrastive_loss.item()
     
     if nb_iter % args.print_iter == 0:
         avg_recons /= args.print_iter
         avg_perplexity /= args.print_iter
         avg_commit /= args.print_iter
+        avg_contrastive /= args.print_iter
         
         writer.add_scalar('./Train/L1', avg_recons, nb_iter)
         writer.add_scalar('./Train/PPL', avg_perplexity, nb_iter)
         writer.add_scalar('./Train/Commit', avg_commit, nb_iter)
+        writer.add_scalar('./Train/Contrastive', avg_contrastive, nb_iter)
         
         logger.info(f"Train. Iter {nb_iter} : \t Commit. {avg_commit:.5f} \t PPL. {avg_perplexity:.2f} \t Recons.  {avg_recons:.5f}")
+        logger.info(f"Contrastive loss: {avg_contrastive:.5f}")
         
         avg_recons, avg_perplexity, avg_commit = 0., 0., 0.,
+        avg_contrastive = 0.
 
     if nb_iter % args.eval_iter == 0:
-        best_fid, best_iter, best_div, best_top1, best_top2, best_top3, best_matching, writer, logger = \
+        best_fid, best_iter, best_div, best_top1, best_top2, best_top3, best_matching, writer, logger, best_mpjpe = \
             eval_bodypart.evaluation_vqvae(
                 args.run_dir, val_loader, net, logger, writer, nb_iter,
                 best_fid, best_iter, best_div, best_top1, best_top2, best_top3, best_matching,
-                eval_wrapper=eval_wrapper)
+                eval_wrapper=eval_wrapper, best_mpjpe=best_mpjpe)
         

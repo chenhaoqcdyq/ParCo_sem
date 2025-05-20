@@ -11,7 +11,7 @@ from dataset.dataset_VQ_bodypart import whole2parts, parts2whole
 
 
 class VQMotionDataset(data.Dataset):
-    def __init__(self, dataset_name, feat_bias=5, unit_length=8, print_warning=False):
+    def __init__(self, dataset_name, feat_bias=5, unit_length=8, print_warning=False, val=False):
         # window_size should not be used in this dataset. It is only for training VQVAE.
         # self.window_size = window_size
         self.unit_length = unit_length
@@ -30,7 +30,8 @@ class VQMotionDataset(data.Dataset):
             fps = 20
             self.max_motion_length = 196
             dim_pose = 263
-            self.meta_dir = 'checkpoints/t2m/VQVAEV3_CB1024_CMT_H1024_NRES3/meta'
+            # self.meta_dir = 'checkpoints/t2m/VQVAEV3_CB1024_CMT_H1024_NRES3/meta'
+            self.meta_dir = 'checkpoints/t2m/Decomp_SP001_SM001_H512/meta'
             #kinematic_chain = paramUtil.t2m_kinematic_chain
         elif dataset_name == 'kit':
             self.data_root = './dataset/KIT-ML'
@@ -41,15 +42,18 @@ class VQMotionDataset(data.Dataset):
             fps = 12.5
             dim_pose = 251
             self.max_motion_length = 196
-            self.meta_dir = 'checkpoints/kit/VQVAEV3_CB1024_CMT_H1024_NRES3/meta'
+            # self.meta_dir = 'checkpoints/kit/VQVAEV3_CB1024_CMT_H1024_NRES3/meta'
+            self.meta_dir = 'checkpoints/kit/Decomp_SP001_SM001_H512/meta'
             #kinematic_chain = paramUtil.kit_kinematic_chain
         
         joints_num = self.joints_num
 
         mean = np.load(pjoin(self.meta_dir, 'mean.npy'))
         std = np.load(pjoin(self.meta_dir, 'std.npy'))
-        
-        split_file = pjoin(self.data_root, 'train.txt')
+        if val:
+            split_file = pjoin(self.data_root, 'val.txt')
+        else:
+            split_file = pjoin(self.data_root, 'train.txt')
         
         data_dict = {}
         id_list = []
@@ -128,9 +132,10 @@ class VQMotionDataset(data.Dataset):
 def DATALoader(dataset_name,
                batch_size  =1,
                num_workers =8,
-               unit_length =4) :
+               unit_length =4,
+               val=False) :
     
-    train_loader = torch.utils.data.DataLoader(VQMotionDataset(dataset_name, unit_length=unit_length),
+    train_loader = torch.utils.data.DataLoader(VQMotionDataset(dataset_name, unit_length=unit_length, val=val),
                                               batch_size,
                                               shuffle=True,
                                               num_workers=num_workers,

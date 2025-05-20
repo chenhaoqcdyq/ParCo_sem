@@ -51,7 +51,8 @@ class Text2MotionDataset(Dataset):
             dim_pose = 251
             self.max_motion_length = 26 if unit_length == 8 else 51
             kinematic_chain = paramUtil.kit_kinematic_chain
-
+        if unit_length==1:
+            self.max_motion_length = 196
         self.vq_dir = vq_dir
         self.parts_name = ['Root', 'R_Leg', 'L_Leg', 'Backbone', 'R_Arm', 'L_Arm']
         split_file = pjoin(self.data_root, 'train.txt')
@@ -214,7 +215,7 @@ class Text2MotionDataset(Dataset):
             if m_tokens_len+1 < self.max_motion_length:
                 m_t = np.concatenate([m_tokens, np.ones((1), dtype=int) * self.mot_end_idx, np.ones((self.max_motion_length-1-m_tokens_len), dtype=int) * self.mot_pad_idx], axis=0)
             else:
-                m_t = np.concatenate([m_tokens, np.ones((1), dtype=int) * self.mot_end_idx], axis=0)
+                m_t = np.concatenate([m_tokens[:self.max_motion_length-1], np.ones((1), dtype=int) * self.mot_end_idx], axis=0)
 
             m_t = m_t.reshape(-1)
             padded_tokens.append(m_t)
